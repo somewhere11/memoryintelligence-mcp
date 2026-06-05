@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memoryintelligence-mcp"
+version = "0.1.5"
+description = "MCP server for MemoryIntelligence — give Claude a memory you own, set up in one command"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Somewhere", email = "connect@somewheremedia.com" }]
+keywords = ["mcp", "model-context-protocol", "memory-intelligence", "claude", "llm", "memory", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "mcp[cli]>=1.0.0,<2.0",
+    "httpx>=0.27.0,<1.0",
+    "pydantic>=2.5.0,<3.0",
+]
+
+[project.urls]
+Homepage = "https://memoryintelligence.io"
+Repository = "https://github.com/somewhere11/memoryintelligence-mcp"
+Issues = "https://github.com/somewhere11/memoryintelligence-mcp/issues"
+Changelog = "https://github.com/somewhere11/memoryintelligence-mcp/blob/main/CHANGELOG.md"
+Documentation = "https://memoryintelligence.io/docs/api-reference"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+mi-mcp = "mi_mcp.__main__:main"
+# Alias so the package name resolves as a command — enables `uvx memoryintelligence-mcp`.
+memoryintelligence-mcp = "mi_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mi_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/mi_mcp", "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
