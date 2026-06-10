@@ -2,9 +2,9 @@
 
 Security model (build-spec §13.3): the API key NEVER goes into any MCP client
 config. ``wire`` writes ``{command: <wrapper>, args: [], env: {}}`` and renders
-a wrapper (``~/.mi/run-mi-mcp.sh``) that resolves ``MI_API_KEY`` at launch from
-the macOS Keychain, then ``~/.mi-env``, else fails. So a leaked config file
-exposes nothing.
+a wrapper (``~/.memoryintelligence/mcp/run-mi-mcp.sh``) that resolves
+``MI_API_KEY`` at launch from the macOS Keychain, then the on-disk keyfile,
+else fails. So a leaked config file exposes nothing.
 
   setup  — one command: store the key, wire hosts, opt in this dir, verify.
            (alias: ``init``). The frictionless front door for new users.
@@ -13,8 +13,12 @@ exposes nothing.
   status — show which surfaces are wired + the capture opt-in allowlist.
 
 The key is stored OUTSIDE every config — in the macOS Keychain (``security``)
-or, on Linux/Windows (or by choice), a ``chmod 600 ~/.mi-env`` keyfile. Both are
+or, on Linux/Windows (or by choice), a ``chmod 600 ~/.memoryintelligence/.env``
+keyfile (the legacy ``~/.mi-env`` is still read for back-compat). Both are
 resolved by the launch wrapper at runtime, so no config file ever holds a secret.
+
+The on-disk layout (launcher, opt-in allowlist, keyfile) lives under
+``~/.memoryintelligence/`` — see ``paths.py``, the single source of truth.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from . import paths
 from .config import load_opt_in_paths
 
 SERVER_KEY = "memory-intelligence"
@@ -41,15 +46,17 @@ WRAPPER_TEMPLATE = r"""#!/usr/bin/env bash
 # Resolves MI_API_KEY at launch so the key never lives in any MCP client config.
 set -euo pipefail
 
-# 1. inherited env  →  2. macOS Keychain  →  3. ~/.mi-env  →  fail
+# 1. inherited env  →  2. macOS Keychain  →  3. keyfile (new then legacy)  →  fail
 if [[ -z "${MI_API_KEY:-}" ]]; then
   MI_API_KEY="$(security find-generic-password -a "${MI_KEYCHAIN_ACCOUNT:-$USER}" -s "MI_API_KEY" -w 2>/dev/null || true)"
 fi
-if [[ -z "${MI_API_KEY:-}" && -f "$HOME/.mi-env" ]]; then
-  set -a; . "$HOME/.mi-env"; set +a
-fi
+for __mi_envf in "$HOME/.memoryintelligence/.env" "$HOME/.mi-env"; do
+  if [[ -z "${MI_API_KEY:-}" && -f "$__mi_envf" ]]; then
+    set -a; . "$__mi_envf"; set +a
+  fi
+done
 if [[ -z "${MI_API_KEY:-}" ]]; then
-  echo "run-mi-mcp: MI_API_KEY not found (env, Keychain service 'MI_API_KEY', or ~/.mi-env)" >&2
+  echo "run-mi-mcp: MI_API_KEY not found (env, Keychain service 'MI_API_KEY', or ~/.memoryintelligence/.env)" >&2
   exit 1
 fi
 export MI_API_KEY
@@ -72,7 +79,7 @@ def _surface_paths(home: Path) -> dict[str, Path]:
 
 
 def _wrapper_path(home: Path) -> Path:
-    return home / ".mi" / "run-mi-mcp.sh"
+    return paths.wrapper_path(home=home)
 
 
 def _mi_mcp_bin() -> str:
@@ -155,13 +162,14 @@ def _resolve_key(home: Path) -> tuple[str, str]:
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip(), "keychain"
     except (OSError, subprocess.SubprocessError):
-        pass  # `security` unavailable/failed — fall through to the ~/.mi-env keyfile
-    envf = home / ".mi-env"
-    if envf.exists():
+        pass  # `security` unavailable/failed — fall through to the keyfile
+    envf = paths.resolve_keyfile(home)  # new ~/.memoryintelligence/.env, else legacy ~/.mi-env
+    if envf is not None:
+        src = "~/.mi-env" if envf.name == ".mi-env" else "~/.memoryintelligence/.env"
         for line in envf.read_text().splitlines():
             line = line.strip()
             if line.startswith("MI_API_KEY="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'"), "~/.mi-env"
+                return line.split("=", 1)[1].strip().strip('"').strip("'"), src
     return "", "none"
 
 
@@ -175,7 +183,7 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
     Shared by ``cmd_wire`` and ``cmd_setup``. Writes ``env: {}`` only — the key is
     never placed in a config; the wrapper resolves it at launch.
     """
-    paths = _surface_paths(home)
+    cfg_paths = _surface_paths(home)
     wrapper = _wrapper_path(home)
     bin_path = _mi_mcp_bin()
     entry = {"command": str(wrapper), "args": [], "env": {}}
@@ -185,14 +193,18 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
     print(f"           execs {bin_path}; resolves MI_API_KEY at launch (no key in configs)")
     if not dry_run:
         _atomic_write(wrapper, WRAPPER_TEMPLATE.replace("__MI_MCP_BIN__", bin_path), mode=0o755)
+        # Bring a legacy ~/.mi/opt-in-paths forward to the new location (no-op if
+        # there's nothing to migrate). Non-destructive — the old file is left.
+        if paths.migrate_opt_in_forward(home=home):
+            print(f"  migrated opt-in allowlist → {paths.opt_in_paths_file(home=home)}")
 
     for s in surfaces:
         if s == "code" and _wire_code_via_cli(home, wrapper, dry_run):
             continue
-        if s not in paths:
+        if s not in cfg_paths:
             print(f"  ! unknown surface '{s}' (skipped)")
             continue
-        cfg_path = paths[s]
+        cfg_path = cfg_paths[s]
         cfg = _load_json(cfg_path)
         servers = cfg.setdefault("mcpServers", {})
         action = "update" if SERVER_KEY in servers else "add"
@@ -219,7 +231,7 @@ def cmd_wire(argv: list[str]) -> int:
     do_wire(home, surfaces, args.dry_run)
     if not args.dry_run:
         print("\nNext steps:")
-        print(f"  1. opt in a project:  echo \"$(pwd)\" >> {home / '.mi' / 'opt-in-paths'}")
+        print(f"  1. opt in a project:  echo \"$(pwd)\" >> {paths.mcp_config_dir(home=home) / 'opt-in-paths'}")
         print("  2. restart Claude (MCP servers load at startup)")
         print("  3. mi-mcp doctor   # verify")
     return 0
@@ -251,7 +263,7 @@ def cmd_doctor(argv: list[str]) -> int:
     check("MI_API_KEY resolvable", bool(key),
           f"source={src}")
 
-    optin = home / ".mi" / "opt-in-paths"
+    optin = paths.opt_in_paths_file(home=home)
     n = len(load_opt_in_paths(optin)) if optin.exists() else 0
     check("opt-in allowlist", True,
           f"{n} entries" if optin.exists() else "absent — all captures will skip",
@@ -276,12 +288,12 @@ def cmd_status(argv: list[str]) -> int:
         wired = SERVER_KEY in _load_json(p).get("mcpServers", {})
         print(f"  {s:8} {'wired ✓  ' if wired else 'not wired'}   {p}")
 
-    optin = home / ".mi" / "opt-in-paths"
-    paths = load_opt_in_paths(optin) if optin.exists() else []
-    print(f"\nOpt-in paths ({len(paths)}):")
-    for p in paths:
+    optin = paths.opt_in_paths_file(home=home)
+    opted = load_opt_in_paths(optin) if optin.exists() else []
+    print(f"\nOpt-in paths ({len(opted)}):")
+    for p in opted:
         print(f"  {p}")
-    if not paths:
+    if not opted:
         print("  (none — captures will be skipped until you add one)")
     return 0
 
@@ -379,13 +391,14 @@ def _store_key_keychain(key: str, account: str) -> None:
 
 
 def _store_key_file(home: Path, key: str) -> Path:
-    """Write the key to a ``chmod 600`` ``~/.mi-env`` keyfile (the launcher reads it).
+    """Write the key to a ``chmod 600`` ``~/.memoryintelligence/.env`` keyfile.
 
     The cross-platform fallback when there is no Keychain (Linux/Windows) or when
     the user explicitly chooses ``--store file``. Still NOT a config file: the
-    launch wrapper sources it at runtime; no MCP config ever holds the key.
+    launch wrapper sources it at runtime; no MCP config ever holds the key. (The
+    launcher still reads the legacy ``~/.mi-env`` too, for existing installs.)
     """
-    envf = home / ".mi-env"
+    envf = paths.keyfile_path(home)
     content = (
         "# MemoryIntelligence MCP — API key, resolved at launch by run-mi-mcp.sh.\n"
         "# Private (chmod 600). Never commit this file.\n"
@@ -396,12 +409,12 @@ def _store_key_file(home: Path, key: str) -> Path:
 
 
 def _opt_in_dir(home: Path, directory: str) -> tuple[Path, bool]:
-    """Add ``directory`` (realpath) to ``~/.mi/opt-in-paths`` if absent.
+    """Add ``directory`` (realpath) to ``~/.memoryintelligence/mcp/opt-in-paths``.
 
     Returns ``(file, added)``. Idempotent — re-running setup in the same dir does
     not duplicate the entry. Realpath normalization matches the consent gate.
     """
-    optin = home / ".mi" / "opt-in-paths"
+    optin = paths.mcp_config_dir(create=True, home=home) / "opt-in-paths"
     target = os.path.realpath(os.path.expanduser(directory))
     existing = load_opt_in_paths(optin) if optin.exists() else []
     if any(os.path.realpath(os.path.expanduser(p)) == target for p in existing):
@@ -422,7 +435,7 @@ def cmd_setup(argv: list[str]) -> int:
     ap.add_argument("--api-key", default=None,
                     help="provide the key non-interactively (else you're prompted, hidden)")
     ap.add_argument("--store", choices=["auto", "keychain", "file"], default="auto",
-                    help="where to keep the key (auto: Keychain on macOS, ~/.mi-env elsewhere)")
+                    help="where to keep the key (auto: Keychain on macOS, ~/.memoryintelligence/.env elsewhere)")
     ap.add_argument("--surfaces", default="desktop,code",
                     help="comma list of: desktop, code, cursor (default: desktop,code)")
     ap.add_argument("--opt-in", default=None, metavar="DIR",

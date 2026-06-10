@@ -42,7 +42,7 @@ logger = logging.getLogger("mi_mcp")
 # surface reduces agent decision-noise; the hidden tools stay callable by name.
 V0_VISIBLE_TOOLS = frozenset({"mi_capture", "mi_ask", "mi_list"})
 
-# Write tools — gated by the cwd consent allowlist (~/.mi/opt-in-paths, Story 8).
+# Write tools — gated by the cwd consent allowlist (~/.memoryintelligence/mcp/opt-in-paths, Story 8).
 # Read tools are never gated; reading your own memory is always safe.
 WRITE_TOOLS = frozenset({"mi_capture", "mi_batch", "mi_upload"})
 
@@ -534,7 +534,7 @@ def create_server(config: MIConfig | None = None) -> Server:
                 logger.info(f"[CONSENT] {name} skipped — cwd not opted in: {cwd}")
                 return [TextContent(type="text", text=_fmt({
                     "status": "skipped",
-                    "reason": "cwd not opted in — add it to ~/.mi/opt-in-paths (or set MI_MCP_OPT_IN_ALL=1)",
+                    "reason": "cwd not opted in — run `mi-mcp setup` here, or add it to ~/.memoryintelligence/mcp/opt-in-paths (or set MI_MCP_OPT_IN_ALL=1)",
                     "cwd": cwd,
                     "tool": name,
                 }))]

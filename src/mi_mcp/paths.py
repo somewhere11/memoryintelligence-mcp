@@ -1,16 +1,22 @@
-"""Filesystem layout for Memory Intelligence (locked 2026-06-05).
+"""Filesystem layout for Memory Intelligence — one on-brand namespace.
 
-One brand namespace, clear visibility split — no lookalike names:
+Single visible/hidden split, no lookalike names:
 
   ~/MemoryIntelligence/          visible vault: the user's *.umo files (relocatable via MI_VAULT)
-  ~/.memoryintelligence/mcp/     hidden MCP config (opt-in-paths, launcher)
+  ~/.memoryintelligence/mcp/     hidden MCP config — launcher + capture opt-in allowlist
   ~/.memoryintelligence/sdk/     hidden SDK plumbing (models, cache)
-  OS Keychain                    keys (never on disk)
+  ~/.memoryintelligence/.env     on-disk keyfile (chmod 600) — cross-platform fallback to the Keychain
+  OS Keychain                    keys, preferred (never on disk)
 
-Retires the legacy ``~/.mi/`` config dir: path resolution prefers the new
-location but falls back to ``~/.mi/`` for one release so existing wiring keeps
-working. Nothing is moved destructively — the launcher relocates on the next
-``mi-mcp wire``; only the opt-in allowlist is (non-destructively) copied forward.
+As of 0.1.7 ``mi-mcp setup``/``wire`` write this layout directly. The retired
+``~/.mi/`` config dir and ``~/.mi-env`` keyfile are still *read* (one-release
+fallback) so existing installs keep working until the next ``wire``; nothing is
+moved destructively. The opt-in allowlist is copied forward on ``wire``.
+
+Every resolver takes an optional ``home`` (used by the CLI's ``--home`` test
+flag and to keep read/write paths in lockstep); when ``None`` it resolves from
+``$MI_HOME`` then ``~``. This module is the SINGLE source of truth for the
+layout — the CLI and the server's consent gate both call it.
 """
 
 from __future__ import annotations
@@ -27,58 +33,95 @@ def _home() -> Path:
     return Path(os.path.expanduser("~"))
 
 
-def hidden_home() -> Path:
-    """``~/.memoryintelligence`` (or ``$MI_HOME``)."""
+def _base(home: Path | None) -> Path:
+    """The home under which the layout is rooted. An explicit ``home`` (CLI
+    ``--home``) wins; else ``~``. ``$MI_HOME`` overrides only the hidden tree."""
+    return Path(home) if home is not None else _home()
+
+
+def hidden_home(home: Path | None = None) -> Path:
+    """``~/.memoryintelligence`` (or ``$MI_HOME``, or ``<home>/.memoryintelligence``)."""
+    if home is not None:
+        return Path(home) / ".memoryintelligence"
     override = os.environ.get(HIDDEN_HOME_ENV)
     return Path(override).expanduser() if override else _home() / ".memoryintelligence"
 
 
-def mcp_config_dir(create: bool = False) -> Path:
-    d = hidden_home() / "mcp"
+def mcp_config_dir(create: bool = False, home: Path | None = None) -> Path:
+    d = hidden_home(home) / "mcp"
     if create:
         d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def sdk_dir(create: bool = False) -> Path:
-    d = hidden_home() / "sdk"
+def sdk_dir(create: bool = False, home: Path | None = None) -> Path:
+    d = hidden_home(home) / "sdk"
     if create:
         d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def legacy_mcp_dir() -> Path:
-    """The retired ``~/.mi/`` directory."""
-    return _home() / ".mi"
+def legacy_mcp_dir(home: Path | None = None) -> Path:
+    """The retired ``~/.mi/`` directory (read-only fallback)."""
+    return _base(home) / ".mi"
 
 
-def vault_dir(create: bool = False) -> Path:
+def vault_dir(create: bool = False, home: Path | None = None) -> Path:
     """The visible ``~/MemoryIntelligence/`` vault (or ``$MI_VAULT``)."""
     override = os.environ.get(VAULT_ENV)
-    d = Path(override).expanduser() if override else _home() / "MemoryIntelligence"
+    if override:
+        d = Path(override).expanduser()
+    else:
+        d = _base(home) / "MemoryIntelligence"
     if create:
         d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def opt_in_paths_file() -> Path:
+def wrapper_path(create: bool = False, home: Path | None = None) -> Path:
+    """The launch wrapper (``run-mi-mcp.sh``) that resolves MI_API_KEY at spawn."""
+    return mcp_config_dir(create=create, home=home) / "run-mi-mcp.sh"
+
+
+def keyfile_path(home: Path | None = None) -> Path:
+    """Preferred on-disk keyfile (``~/.memoryintelligence/.env``, chmod 600) — the
+    cross-platform fallback when there is no Keychain. Shared by mcp + sdk."""
+    return hidden_home(home) / ".env"
+
+
+def legacy_keyfile_path(home: Path | None = None) -> Path:
+    """The retired ``~/.mi-env`` keyfile, still read for back-compat (and the
+    ecosystem digest pipeline that points at it)."""
+    return _base(home) / ".mi-env"
+
+
+def resolve_keyfile(home: Path | None = None) -> Path | None:
+    """Existing keyfile to read — new location preferred, legacy fallback — or
+    ``None`` if neither exists (then only env/Keychain can supply the key)."""
+    for p in (keyfile_path(home), legacy_keyfile_path(home)):
+        if p.exists():
+            return p
+    return None
+
+
+def opt_in_paths_file(home: Path | None = None) -> Path:
     """The capture-consent allowlist. New location preferred; falls back to the
     legacy ``~/.mi/opt-in-paths`` if it exists and the new one doesn't."""
-    new = mcp_config_dir() / "opt-in-paths"
+    new = mcp_config_dir(home=home) / "opt-in-paths"
     if new.exists():
         return new
-    legacy = legacy_mcp_dir() / "opt-in-paths"
+    legacy = legacy_mcp_dir(home) / "opt-in-paths"
     if legacy.exists():
         return legacy
     return new  # default to the new location for writes
 
 
-def migrate_opt_in_forward() -> bool:
+def migrate_opt_in_forward(home: Path | None = None) -> bool:
     """Non-destructively copy the legacy opt-in allowlist to the new location if
-    the new one doesn't exist yet. Leaves ``~/.mi/`` intact (the launcher there
-    keeps working until the next ``mi-mcp wire``). Returns True if it copied."""
-    new = mcp_config_dir() / "opt-in-paths"
-    legacy = legacy_mcp_dir() / "opt-in-paths"
+    the new one doesn't exist yet. Leaves ``~/.mi/`` intact. Returns True if it
+    copied."""
+    new = mcp_config_dir(home=home) / "opt-in-paths"
+    legacy = legacy_mcp_dir(home) / "opt-in-paths"
     if new.exists() or not legacy.exists():
         return False
     new.parent.mkdir(parents=True, exist_ok=True)

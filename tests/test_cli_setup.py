@@ -50,15 +50,15 @@ def _code(home):
 
 
 def _wrapper(home):
-    return home / ".mi" / "run-mi-mcp.sh"
+    return home / ".memoryintelligence" / "mcp" / "run-mi-mcp.sh"
 
 
 def _envfile(home):
-    return home / ".mi-env"
+    return home / ".memoryintelligence" / ".env"
 
 
 def _optin(home):
-    return home / ".mi" / "opt-in-paths"
+    return home / ".memoryintelligence" / "mcp" / "opt-in-paths"
 
 
 def test_setup_file_store_wires_and_opts_in(tmp_path, monkeypatch, setup_env):

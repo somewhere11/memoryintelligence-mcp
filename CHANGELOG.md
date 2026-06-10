@@ -3,6 +3,27 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] — 2026-06-09
+
+### Changed
+- **Hidden files now live under `~/.memoryintelligence/`** (was `~/.mi/`), matching
+  the visible `~/MemoryIntelligence/` vault — one on-brand namespace:
+  - launcher → `~/.memoryintelligence/mcp/run-mi-mcp.sh`
+  - capture opt-in allowlist → `~/.memoryintelligence/mcp/opt-in-paths`
+  - keyfile (the Keychain fallback) → `~/.memoryintelligence/.env`
+
+  `mi-mcp setup`/`wire` write the new layout and migrate an existing
+  `~/.mi/opt-in-paths` forward non-destructively. The legacy `~/.mi/` launcher
+  and `~/.mi-env` keyfile are still **read** for one release, so existing
+  installs keep working until you re-run `wire`. `paths.py` is now the single
+  source of truth for the layout (it previously declared the new layout while the
+  CLI still wrote `~/.mi/` — that split is fixed here).
+
+### Added
+- **README "Names & locations" map** — explains the package / command / server-id
+  names (`memoryintelligence-mcp` / `mi-mcp` / `memory-intelligence`) and where
+  every file lives, so the naming no longer looks arbitrary.
+
 ## [0.1.6] — 2026-06-09
 
 ### Security
@@ -12,11 +33,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/); this project
   the key resolved from (Keychain / keyfile / env), never the key itself.
 
 ### Added
-- **MCP ↔ API contract tests** (`tests/test_api_contract.py`) — pin that every
-  client method sends only parameter values the API accepts (`explain`,
-  `pii_handling`, `retention_policy`, `scope`), so an API enum/type change can
-  never silently 422 a real call. This is the general form of the `explain`
-  bool→enum bug fixed in 0.1.3.
+- **MCP ↔ API contract tests** (`tests/test_api_contract.py`, run in CI — not
+  shipped in the published package) — pin that every client method sends only
+  parameter values the API accepts (`explain`, `pii_handling`,
+  `retention_policy`, `scope`), so an API enum/type change can never silently
+  422 a real call. This is the general form of the `explain` bool→enum bug
+  fixed in 0.1.3.
 
 ### Changed
 - Internal code-quality cleanups (narrowed a few broad `except` clauses, removed

@@ -21,7 +21,7 @@ def _code(home: Path) -> Path:
 
 
 def _wrapper(home: Path) -> Path:
-    return home / ".mi" / "run-mi-mcp.sh"
+    return home / ".memoryintelligence" / "mcp" / "run-mi-mcp.sh"
 
 
 def test_wire_creates_wrapper_and_configs_without_key(tmp_path):
@@ -85,6 +85,28 @@ def test_status_reflects_wire(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "wired ✓" in out
     assert "desktop" in out
+
+
+def test_wire_migrates_legacy_opt_in_forward(tmp_path):
+    # An existing ~/.mi/opt-in-paths (≤0.1.6 install) is copied to the new
+    # ~/.memoryintelligence/mcp/ location on wire, non-destructively.
+    legacy = tmp_path / ".mi" / "opt-in-paths"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("/some/legacy/project\n")
+
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+
+    new = tmp_path / ".memoryintelligence" / "mcp" / "opt-in-paths"
+    assert new.exists(), "legacy opt-in not migrated to the new location"
+    assert "/some/legacy/project" in new.read_text()
+    assert legacy.exists(), "migration must be non-destructive (legacy left intact)"
+
+
+def test_wire_uses_on_brand_dir_not_legacy(tmp_path):
+    # The launcher + opt-in must land under ~/.memoryintelligence/, never ~/.mi/.
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    assert (tmp_path / ".memoryintelligence" / "mcp" / "run-mi-mcp.sh").exists()
+    assert not (tmp_path / ".mi").exists(), "must not create the legacy ~/.mi dir"
 
 
 def test_wire_code_uses_claude_cli_for_real_home(tmp_path, monkeypatch):

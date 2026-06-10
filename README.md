@@ -37,7 +37,7 @@ API key is ever written into a config file.**
 
 ---
 
-## ✅ What works today (0.1.5)
+## ✅ What works today (0.1.7)
 
 Honest status — this is beta, so here's exactly what's live:
 
@@ -142,7 +142,7 @@ provenance — runs in the service. Your API key authenticates to *your* account
 
 1. **prompts for your API key** (hidden input);
 2. **stores it securely, outside every config** — macOS **Keychain**, or a
-   `chmod 600 ~/.mi-env` keyfile on Linux/Windows (or with `--store file`);
+   `chmod 600 ~/.memoryintelligence/.env` keyfile on Linux/Windows (or with `--store file`);
 3. **wires** the server into Claude Desktop + Claude Code (`--surfaces` to choose
    `desktop,code,cursor`), writing `env: {}` — **no key in any config file**;
 4. **opts in** the current directory so captures are allowed there (reads work
@@ -152,7 +152,7 @@ provenance — runs in the service. Your API key authenticates to *your* account
 ```bash
 mi-mcp setup                       # the happy path (interactive)
 mi-mcp setup --surfaces desktop,code,cursor
-mi-mcp setup --store file          # force the ~/.mi-env keyfile (e.g. on Linux)
+mi-mcp setup --store file          # force the ~/.memoryintelligence/.env keyfile (e.g. on Linux)
 mi-mcp setup --no-opt-in           # wire only; opt a folder in later
 ```
 
@@ -167,12 +167,12 @@ mi-mcp wire --dry-run   # preview wiring changes without writing
 
 ### How the key stays out of your configs
 
-`wire` points each host at a small launcher (`~/.mi/run-mi-mcp.sh`) that resolves
-`MI_API_KEY` **at launch**, in order:
+`wire` points each host at a small launcher (`~/.memoryintelligence/mcp/run-mi-mcp.sh`)
+that resolves `MI_API_KEY` **at launch**, in order:
 
 1. the process environment, then
 2. the macOS **Keychain** (`security find-generic-password -s MI_API_KEY`), then
-3. a gitignored `~/.mi-env` (`chmod 600`), else it fails.
+3. a `chmod 600` keyfile (`~/.memoryintelligence/.env`, or the legacy `~/.mi-env`), else it fails.
 
 So a leaked or committed config file exposes **nothing**.
 
@@ -185,12 +185,12 @@ So a leaked or committed config file exposes **nothing**.
 ## Security
 
 - **No key in configs.** `setup`/`wire` write `env: {}`; the launcher resolves the
-  key from the Keychain (or `~/.mi-env`) at runtime. Nothing sensitive lands in a
-  config file.
+  key from the Keychain (or the `~/.memoryintelligence/.env` keyfile) at runtime.
+  Nothing sensitive lands in a config file.
 - **Capture is opt-in per directory.** Write tools (`mi_capture`/`mi_batch`/
   `mi_upload`) only run when the server's working directory is on the
-  `~/.mi/opt-in-paths` allowlist. Reads are never gated. Absent allowlist → all
-  captures are skipped.
+  `~/.memoryintelligence/mcp/opt-in-paths` allowlist. Reads are never gated. Absent
+  allowlist → all captures are skipped.
 - **Destructive ops require confirmation.** `mi_forget` (irreversible delete)
   requires an explicit `confirm=true` argument — a human-in-the-loop guard against
   injected or accidental deletes.
@@ -213,8 +213,8 @@ So a leaked or committed config file exposes **nothing**.
 - **Privacy.** Content you capture is sent to your MemoryIntelligence account over
   HTTPS; nothing else is transmitted, and the server does not log conversation
   content or your API key. See [memoryintelligence.io/privacy](https://memoryintelligence.io/privacy).
-- **Off switch.** Clear `~/.mi/opt-in-paths` (captures skip) or remove the
-  `memory-intelligence` entry from your Claude config to fully unwire.
+- **Off switch.** Clear `~/.memoryintelligence/mcp/opt-in-paths` (captures skip) or
+  remove the `memory-intelligence` entry from your Claude config to fully unwire.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md) — report privately to
 connect@somewheremedia.com.
@@ -223,7 +223,7 @@ connect@somewheremedia.com.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MI_API_KEY` | Yes | — | Your MI API key (resolved by the launcher from the Keychain / `~/.mi-env` — don't set inline in configs) |
+| `MI_API_KEY` | Yes | — | Your MI API key (resolved by the launcher from the Keychain / `~/.memoryintelligence/.env` — don't set inline in configs) |
 | `MI_BASE_URL` | No | `https://api.memoryintelligence.io` | API base URL |
 | `MI_MCP_FULL` | No | _(off)_ | `1` exposes all 10 tools; otherwise only the 3 core |
 | `MI_TRANSPORT` | No | `stdio` | `stdio` only in this version (networked transports disabled) |
@@ -232,6 +232,35 @@ connect@somewheremedia.com.
 | `MI_DEFAULT_SCOPE` | No | `user` | Default governance scope |
 | `MI_DEFAULT_RETENTION` | No | `meaning_only` | Default retention policy |
 | `MI_DEFAULT_PII_HANDLING` | No | `extract_and_redact` | Default PII handling |
+
+## Names & locations
+
+You'll see a few related names. They differ because each ecosystem has its own
+rules (PyPI lowercases, Python imports can't contain hyphens, MCP server ids are
+lowercase-hyphen) — but they collapse to one **long form** and one **short form**:
+
+| You see | What it is | Why this form |
+|---|---|---|
+| `MemoryIntelligence` | the brand | display name |
+| `memoryintelligence-mcp` | the **PyPI package** (`pip install` / `uvx`) | PyPI normalizes to lowercase + hyphens |
+| `mi-mcp` | the **command** you run (`mi-mcp setup`) | short for daily use (`memoryintelligence-mcp` is an alias) |
+| `mi_mcp` | the Python import package | must be a valid identifier — no hyphens |
+| `memory-intelligence` | the **server id** in your MCP config | MCP convention: lowercase-hyphen |
+| `MI_*` (e.g. `MI_API_KEY`) | environment variables / Keychain service | short prefix |
+
+And everything written to disk lives under one on-brand namespace:
+
+| Path | What |
+|---|---|
+| `~/MemoryIntelligence/` | visible vault — your `.umo` files (override with `MI_VAULT`) |
+| `~/.memoryintelligence/mcp/run-mi-mcp.sh` | the launcher each MCP host spawns |
+| `~/.memoryintelligence/mcp/opt-in-paths` | per-directory capture allowlist |
+| `~/.memoryintelligence/.env` | `chmod 600` keyfile (the Keychain fallback) |
+| macOS Keychain (`MI_API_KEY`) | preferred key storage — never on disk |
+
+> Upgrading from ≤ 0.1.6? The old `~/.mi/` launcher and `~/.mi-env` keyfile still
+> work (they're read as a fallback). Re-run `mi-mcp wire` to move to the new paths;
+> your opt-in list is migrated forward automatically.
 
 ## Manual setup (cross-platform / advanced)
 
@@ -244,15 +273,16 @@ then run `mi-mcp wire`:
 ```bash
 read -s K; security add-generic-password -a "$USER" -s "MI_API_KEY" -w "$K" -U; unset K
 mi-mcp wire
-echo "$(pwd)" >> ~/.mi/opt-in-paths
+echo "$(pwd)" >> ~/.memoryintelligence/mcp/opt-in-paths
 ```
 
-**Linux / Windows (WSL or Git Bash) — `~/.mi-env` keyfile:**
+**Linux / Windows (WSL or Git Bash) — `~/.memoryintelligence/.env` keyfile:**
 
 ```bash
-umask 077 && printf 'MI_API_KEY="%s"\n' "$YOUR_KEY" > ~/.mi-env   # chmod 600
+mkdir -p ~/.memoryintelligence
+umask 077 && printf 'MI_API_KEY="%s"\n' "$YOUR_KEY" > ~/.memoryintelligence/.env   # chmod 600
 mi-mcp wire
-echo "$(pwd)" >> ~/.mi/opt-in-paths
+echo "$(pwd)" >> ~/.memoryintelligence/mcp/opt-in-paths
 ```
 
 **Or just an environment variable** (any OS — exported in your shell profile):
@@ -262,8 +292,9 @@ export MI_API_KEY="mi_sk_..."     # the launcher reads the inherited env first
 ```
 
 The launcher resolves the key in order: **inherited env → macOS Keychain →
-`~/.mi-env`**. `security add-generic-password` is macOS-only, so on Linux/Windows
-use the keyfile or env var — never paste the key into an MCP client config.
+`~/.memoryintelligence/.env`** (the legacy `~/.mi-env` is still read).
+`security add-generic-password` is macOS-only, so on Linux/Windows use the keyfile
+or env var — never paste the key into an MCP client config.
 
 ## Development
 
