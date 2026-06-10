@@ -3,6 +3,25 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] — 2026-06-09
+
+### Security
+- **`doctor` no longer prints any bytes of your API key.** `mi-mcp doctor`
+  previously logged an 11-character prefix of the resolved key (CodeQL
+  `py/clear-text-logging-sensitive-data`, high). It now reports only *where*
+  the key resolved from (Keychain / keyfile / env), never the key itself.
+
+### Added
+- **MCP ↔ API contract tests** (`tests/test_api_contract.py`) — pin that every
+  client method sends only parameter values the API accepts (`explain`,
+  `pii_handling`, `retention_policy`, `scope`), so an API enum/type change can
+  never silently 422 a real call. This is the general form of the `explain`
+  bool→enum bug fixed in 0.1.3.
+
+### Changed
+- Internal code-quality cleanups (narrowed a few broad `except` clauses, removed
+  an unused import). No behavior change.
+
 ## [0.1.5] — 2026-06-05
 
 ### Added

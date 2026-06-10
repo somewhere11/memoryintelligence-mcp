@@ -7,7 +7,9 @@ config file; the rendered wrapper carries the key-resolution logic instead.
 import json
 from pathlib import Path
 
-from mi_mcp.cli import run_admin, SERVER_KEY
+import mi_mcp.cli as cli
+
+run_admin, SERVER_KEY = cli.run_admin, cli.SERVER_KEY
 
 
 def _desktop(home: Path) -> Path:
@@ -88,7 +90,6 @@ def test_status_reflects_wire(tmp_path, capsys):
 def test_wire_code_uses_claude_cli_for_real_home(tmp_path, monkeypatch):
     # Make tmp_path look like the real HOME so the claude-CLI branch activates.
     monkeypatch.setenv("HOME", str(tmp_path))
-    import mi_mcp.cli as cli
 
     calls: list[list[str]] = []
     monkeypatch.setattr(cli.shutil, "which",

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memoryintelligence-mcp"
-version = "0.1.5"
+version = "0.1.6"
 description = "MCP server for MemoryIntelligence — give Claude a memory you own, set up in one command"
 readme = "README.md"
 license = "MIT"
@@ -37,10 +37,16 @@ Changelog = "https://github.com/somewhere11/memoryintelligence-mcp/blob/main/CHA
 Documentation = "https://memoryintelligence.io/docs/api-reference"
 
 [project.optional-dependencies]
+# Local vault (Path A): owner-side .umo encryption/decryption + signature verify.
+# Kept out of the base install so the thin server-client stays lightweight.
+local = [
+    "cryptography>=42.0,<46",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "ruff>=0.4.0",
+    "cryptography>=42.0,<46",
 ]
 
 [project.scripts]

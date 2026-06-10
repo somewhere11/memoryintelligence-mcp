@@ -26,10 +26,10 @@ logger = logging.getLogger("mi_mcp")
 
 
 def main():
-    # Admin subcommands: `mi-mcp {setup|init|wire|doctor|status}`. Bare `mi-mcp`
-    # (no subcommand) runs the server — that's how the MCP host spawns it.
+    # Admin subcommands: `mi-mcp {setup|init|wire|doctor|status|memory}`. Bare
+    # `mi-mcp` (no subcommand) runs the server — that's how the MCP host spawns it.
     argv = sys.argv[1:]
-    if argv and argv[0] in ("setup", "init", "wire", "doctor", "status"):
+    if argv and argv[0] in ("setup", "init", "wire", "doctor", "status", "memory"):
         from .cli import run_admin
         sys.exit(run_admin(argv[0], argv[1:]))
 

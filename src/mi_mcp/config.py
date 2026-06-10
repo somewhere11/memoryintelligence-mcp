@@ -10,6 +10,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import paths
+
 
 @dataclass(frozen=True)
 class MIConfig:
@@ -76,18 +78,20 @@ class MIConfig:
 # Capture consent gate (Story 8) — writes only from opted-in directories
 # =============================================================================
 
+# Legacy location; new resolver is paths.opt_in_paths_file() (with fallback here).
 OPT_IN_PATHS_FILE = Path.home() / ".mi" / "opt-in-paths"
 
 
 def load_opt_in_paths(path: Path | None = None) -> list[str]:
     """Load the capture opt-in allowlist.
 
-    File: ~/.mi/opt-in-paths — one path per line. `~` is expanded; fnmatch
-    globs (``*``, ``?``, ``[]``) are supported; blank lines and lines starting
-    with ``#`` are ignored. Absent file → empty list → every capture is
-    skipped (explicit opt-in required; matches the ownership-first stance).
+    File: ``~/.memoryintelligence/mcp/opt-in-paths`` (new) with a one-release
+    fallback to the legacy ``~/.mi/opt-in-paths``. One path per line; `~` is
+    expanded; fnmatch globs (``*``, ``?``, ``[]``) are supported; blank lines and
+    lines starting with ``#`` are ignored. Absent file → empty list → every
+    capture is skipped (explicit opt-in required; matches the ownership stance).
     """
-    path = path or OPT_IN_PATHS_FILE
+    path = path or paths.opt_in_paths_file()
     if not path.exists():
         return []
     out: list[str] = []

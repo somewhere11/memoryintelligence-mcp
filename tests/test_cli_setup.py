@@ -14,7 +14,8 @@ import sys
 import pytest
 
 import mi_mcp.cli as cli
-from mi_mcp.cli import SERVER_KEY, run_admin
+
+SERVER_KEY, run_admin = cli.SERVER_KEY, cli.run_admin
 
 KEY = "mi_sk_test_0123456789abcdef"
 

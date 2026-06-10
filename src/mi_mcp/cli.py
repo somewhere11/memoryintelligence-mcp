@@ -125,7 +125,7 @@ def _atomic_write(path: Path, content: str, mode: int | None = None) -> None:
         try:
             os.unlink(tmp)
         except OSError:
-            pass
+            pass  # tmp already gone / unremovable — the original error is re-raised below
         raise
 
 
@@ -155,7 +155,7 @@ def _resolve_key(home: Path) -> tuple[str, str]:
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip(), "keychain"
     except (OSError, subprocess.SubprocessError):
-        pass
+        pass  # `security` unavailable/failed — fall through to the ~/.mi-env keyfile
     envf = home / ".mi-env"
     if envf.exists():
         for line in envf.read_text().splitlines():
@@ -249,7 +249,7 @@ def cmd_doctor(argv: list[str]) -> int:
 
     key, src = _resolve_key(home)
     check("MI_API_KEY resolvable", bool(key),
-          f"source={src}" + (f", prefix={key[:11]}…" if key else ""))
+          f"source={src}")
 
     optin = home / ".mi" / "opt-in-paths"
     n = len(load_opt_in_paths(optin)) if optin.exists() else 0
@@ -283,6 +283,75 @@ def cmd_status(argv: list[str]) -> int:
         print(f"  {p}")
     if not paths:
         print("  (none — captures will be skipped until you add one)")
+    return 0
+
+
+def cmd_memory(argv: list[str]) -> int:
+    """Inspect the local vault: ``mi-mcp memory {ls|open|verify|rm|path}``."""
+    from . import umo_format, vault
+
+    ap = argparse.ArgumentParser(prog="mi-mcp memory")
+    sub = ap.add_subparsers(dest="action", required=True)
+    sub.add_parser("ls", help="list memories in the vault (no key needed)")
+    sub.add_parser("path", help="print the vault directory")
+    for name, helptext in (
+        ("open", "decrypt + print a memory by umo_id (needs your master key)"),
+        ("verify", "verify a memory's signature offline"),
+        ("rm", "delete a memory by umo_id"),
+    ):
+        sp = sub.add_parser(name, help=helptext)
+        sp.add_argument("umo_id")
+    args = ap.parse_args(argv)
+
+    if args.action == "path":
+        print(vault.vault_path())
+        return 0
+
+    if args.action == "ls":
+        rows = vault.summarize()
+        if not rows:
+            print(f"(no memories yet in {vault.vault_path()})")
+            return 0
+        print(f"{'UMO ID':<28} {'CREATED':<22} {'FILE':<20} SIZE")
+        for r in rows:
+            print(f"{r['umo_id']:<28} {r['created_at']:<22} {r['file']:<20} {r['size']}")
+        return 0
+
+    if args.action == "rm":
+        ok = vault.delete_umo(args.umo_id)
+        print("deleted" if ok else f"not found: {args.umo_id}")
+        return 0 if ok else 1
+
+    path = vault.find_by_umo_id(args.umo_id)
+    if path is None:
+        print(f"not found: {args.umo_id}")
+        return 1
+    parsed = umo_format.parse(path.read_bytes())
+
+    if args.action == "verify":
+        pub_b64 = os.environ.get("MI_SIGNING_PUBKEY")
+        if not pub_b64:
+            print("⚠ no pinned MI signing key — set MI_SIGNING_PUBKEY="
+                  "<base64 ed25519 public key> to verify")
+            return 2
+        import base64
+
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        mi_pub = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(pub_b64))
+        ok = umo_format.verify(parsed, mi_pub)
+        print("signature OK ✓" if ok else "signature INVALID ✗")
+        return 0 if ok else 1
+
+    # open
+    from . import keys
+    try:
+        priv = keys.load_master_private_key(create=False)
+        out = umo_format.decrypt_as_owner(parsed, priv)
+    except Exception as e:
+        detail = str(e) or type(e).__name__
+        print(f"cannot open: {detail} (wrong master key, or file corrupted)")
+        return 1
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -450,6 +519,7 @@ _COMMANDS = {
     "wire": cmd_wire,
     "doctor": cmd_doctor,
     "status": cmd_status,
+    "memory": cmd_memory,
 }
 
 
