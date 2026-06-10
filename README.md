@@ -214,7 +214,7 @@ So a leaked or committed config file exposes **nothing**.
   HTTPS; nothing else is transmitted, and the server does not log conversation
   content or your API key. See [memoryintelligence.io/privacy](https://memoryintelligence.io/privacy).
 - **Off switch.** Clear `~/.memoryintelligence/mcp/opt-in-paths` (captures skip) or
-  remove the `memory-intelligence` entry from your Claude config to fully unwire.
+  remove the `memoryintelligence` entry from your Claude config to fully unwire.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md) — report privately to
 connect@somewheremedia.com.
@@ -245,7 +245,7 @@ lowercase-hyphen) — but they collapse to one **long form** and one **short for
 | `memoryintelligence-mcp` | the **PyPI package** (`pip install` / `uvx`) | PyPI normalizes to lowercase + hyphens |
 | `mi-mcp` | the **command** you run (`mi-mcp setup`) | short for daily use (`memoryintelligence-mcp` is an alias) |
 | `mi_mcp` | the Python import package | must be a valid identifier — no hyphens |
-| `memory-intelligence` | the **server id** in your MCP config | MCP convention: lowercase-hyphen |
+| `memoryintelligence` | the **server id** in your MCP config | matches the brand token (renamed from `memory-intelligence` in 0.1.8) |
 | `MI_*` (e.g. `MI_API_KEY`) | environment variables / Keychain service | short prefix |
 
 And everything written to disk lives under one on-brand namespace:

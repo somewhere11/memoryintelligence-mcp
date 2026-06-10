@@ -78,6 +78,22 @@ def test_wire_preserves_other_servers(tmp_path):
     assert SERVER_KEY in cfg["mcpServers"]                              # ours added
 
 
+def test_wire_migrates_legacy_server_id(tmp_path):
+    # A pre-0.1.8 config registered under the old id "memory-intelligence" is
+    # replaced by the new "memoryintelligence" id on wire — no orphan/duplicate.
+    cfg_path = _desktop(tmp_path)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"mcpServers": {
+        "memory-intelligence": {"command": "/old/run-mi-mcp.sh", "args": [], "env": {}},
+        "other": {"command": "/usr/bin/other"},
+    }}))
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    servers = json.loads(cfg_path.read_text())["mcpServers"]
+    assert "memory-intelligence" not in servers                # legacy id removed
+    assert SERVER_KEY in servers                                # new id added
+    assert servers["other"] == {"command": "/usr/bin/other"}   # unrelated untouched
+
+
 def test_status_reflects_wire(tmp_path, capsys):
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
     capsys.readouterr()  # clear

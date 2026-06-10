@@ -139,7 +139,7 @@ def create_server(config: MIConfig | None = None) -> Server:
         config = MIConfig.from_env()
 
     client = MIClient(config)
-    server = Server("memory-intelligence", instructions=SERVER_INSTRUCTIONS)
+    server = Server("memoryintelligence", instructions=SERVER_INSTRUCTIONS)
 
     if os.environ.get("MI_MCP_OPT_IN_ALL") == "1":
         logger.warning(

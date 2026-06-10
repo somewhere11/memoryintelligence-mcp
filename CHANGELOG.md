@@ -3,6 +3,20 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] — 2026-06-10
+
+### Changed
+- **The MCP server id is now `memoryintelligence`** (was `memory-intelligence`).
+  This is the id under `mcpServers` in your config and the name in
+  `claude mcp add …`. It now matches the brand/package token everywhere else
+  (`MemoryIntelligence`, `memoryintelligence-mcp`) instead of splitting the word
+  with a dash.
+- **Auto-migration:** `mi-mcp wire`/`setup` removes the old `memory-intelligence`
+  entry from every surface (file configs **and** `claude mcp remove`) before
+  adding the new id, so an upgrade leaves no duplicate/orphan. `mi-mcp doctor`
+  flags a leftover legacy entry and tells you to re-wire. **Action on upgrade:
+  run `mi-mcp wire` once.** (Hand-edited configs: rename the key yourself.)
+
 ## [0.1.7] — 2026-06-09
 
 ### Changed

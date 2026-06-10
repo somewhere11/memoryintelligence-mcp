@@ -36,7 +36,11 @@ from pathlib import Path
 from . import paths
 from .config import load_opt_in_paths
 
-SERVER_KEY = "memory-intelligence"
+SERVER_KEY = "memoryintelligence"
+# Pre-0.1.8 server ids we replace on wire so an upgrade leaves no orphaned entry.
+# (0.1.7 and earlier registered the server as "memory-intelligence" — the one
+# dash-seam that didn't match the brand/package "memoryintelligence".)
+LEGACY_SERVER_KEYS = ("memory-intelligence",)
 
 # Wrapper rendered by `wire`. __MI_MCP_BIN__ is replaced with the absolute path
 # to the mi-mcp binary (resolved at wire time) so the host can spawn it even
@@ -106,8 +110,10 @@ def _wire_code_via_cli(home: Path, wrapper: Path, dry_run: bool) -> bool:
     if dry_run:
         print(f"           would run: {' '.join(add_cmd)}")
         return True
-    # idempotent: drop any existing entry (any scope) first, then add
-    subprocess.run([claude, "mcp", "remove", SERVER_KEY], capture_output=True, text=True)
+    # idempotent + migrate: drop any existing entry — current id AND the legacy
+    # pre-0.1.8 ids — before re-adding, so an upgrade leaves no orphan.
+    for key in (SERVER_KEY, *LEGACY_SERVER_KEYS):
+        subprocess.run([claude, "mcp", "remove", key], capture_output=True, text=True)
     r = subprocess.run(add_cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(f"           ! claude mcp add failed ({r.stderr.strip()[:160]}); falling back to file")
@@ -188,7 +194,7 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
     bin_path = _mi_mcp_bin()
     entry = {"command": str(wrapper), "args": [], "env": {}}
 
-    print(f"{'DRY-RUN: ' if dry_run else ''}wiring memory-intelligence MCP server")
+    print(f"{'DRY-RUN: ' if dry_run else ''}wiring {SERVER_KEY} MCP server")
     print(f"  wrapper → {wrapper}")
     print(f"           execs {bin_path}; resolves MI_API_KEY at launch (no key in configs)")
     if not dry_run:
@@ -207,6 +213,11 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
         cfg_path = cfg_paths[s]
         cfg = _load_json(cfg_path)
         servers = cfg.setdefault("mcpServers", {})
+        # Migrate: drop any pre-0.1.8 id (e.g. "memory-intelligence") so the
+        # rename to "memoryintelligence" doesn't leave a duplicate/orphan entry.
+        migrated = [k for k in LEGACY_SERVER_KEYS if servers.pop(k, None) is not None]
+        if migrated:
+            print(f"  {s:8} migrated id {', '.join(migrated)} → {SERVER_KEY}")
         action = "update" if SERVER_KEY in servers else "add"
         nochange = servers.get(SERVER_KEY) == entry
         servers[SERVER_KEY] = entry
@@ -270,8 +281,13 @@ def cmd_doctor(argv: list[str]) -> int:
           critical=False)
 
     for s, p in _surface_paths(home).items():
-        wired = SERVER_KEY in _load_json(p).get("mcpServers", {})
-        check(f"{s} wired", wired, str(p) if wired else "(not wired)", critical=False)
+        servers = _load_json(p).get("mcpServers", {})
+        wired = SERVER_KEY in servers
+        legacy = [k for k in LEGACY_SERVER_KEYS if k in servers]
+        detail = str(p) if wired else "(not wired)"
+        if legacy and not wired:
+            detail = f"legacy id {', '.join(legacy)} present — run `mi-mcp wire` to migrate"
+        check(f"{s} wired", wired, detail, critical=False)
 
     print(f"\n  {'healthy ✓' if ok else 'issues found ✗'}")
     return 0 if ok else 1
