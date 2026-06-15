@@ -25,6 +25,7 @@ class MIConfig:
 
     # Optional defaults
     default_scope: str = "user"
+    default_source: str = "mcp"  # provenance label stamped on captures lacking an explicit source
     default_retention: str = "meaning_only"
     default_pii_handling: str = "extract_and_redact"
 
@@ -49,7 +50,7 @@ class MIConfig:
             MI_TRANSPORT       — stdio | sse | streamable-http (default: stdio)
             MI_HOST            — bind host for SSE/HTTP (default: 127.0.0.1, loopback only)
             MI_PORT            — bind port for SSE/HTTP (default: 8100)
-            MI_MCP_FULL        — "1" exposes all 10 tools; otherwise only the 3 core (#256)
+            MI_MCP_FULL        — "1" exposes all 10 tools; otherwise only the core set (#256)
         """
         api_key = os.environ.get("MI_API_KEY", "")
         if not api_key:
@@ -65,6 +66,7 @@ class MIConfig:
             api_key=api_key,
             base_url=os.environ.get("MI_BASE_URL", cls.base_url).rstrip("/"),
             default_scope=os.environ.get("MI_DEFAULT_SCOPE", cls.default_scope),
+            default_source=os.environ.get("MI_DEFAULT_SOURCE", cls.default_source),
             default_retention=os.environ.get("MI_DEFAULT_RETENTION", cls.default_retention),
             default_pii_handling=os.environ.get("MI_DEFAULT_PII_HANDLING", cls.default_pii_handling),
             transport=os.environ.get("MI_TRANSPORT", cls.transport),

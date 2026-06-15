@@ -44,7 +44,10 @@ LEGACY_SERVER_KEYS = ("memory-intelligence",)
 
 # Wrapper rendered by `wire`. __MI_MCP_BIN__ is replaced with the absolute path
 # to the mi-mcp binary (resolved at wire time) so the host can spawn it even
-# with a minimal PATH.
+# with a minimal PATH. If that path later goes stale (a reinstall/upgrade moved
+# the binary), the wrapper self-heals by re-resolving via PATH + the common
+# install dirs — so a moved binary degrades to one clear, actionable error
+# instead of the silent spawn failure that strands a stale absolute path.
 WRAPPER_TEMPLATE = r"""#!/usr/bin/env bash
 # Rendered by `mi-mcp wire` — do not edit; re-run wire to regenerate.
 # Resolves MI_API_KEY at launch so the key never lives in any MCP client config.
@@ -64,7 +67,30 @@ if [[ -z "${MI_API_KEY:-}" ]]; then
   exit 1
 fi
 export MI_API_KEY
-exec "__MI_MCP_BIN__" "$@"
+
+# Resolve the mi-mcp binary. The path captured at `wire` time is tried first —
+# it's the most reliable under a host's minimal GUI PATH (e.g. Claude Desktop).
+# If a reinstall/upgrade moved it, fall back to PATH then the common install
+# dirs so the launcher self-heals instead of failing silently.
+MI_MCP_BIN="__MI_MCP_BIN__"
+if [[ ! -x "$MI_MCP_BIN" ]]; then
+  MI_MCP_BIN="$(command -v mi-mcp 2>/dev/null || true)"
+fi
+if [[ -z "${MI_MCP_BIN:-}" || ! -x "$MI_MCP_BIN" ]]; then
+  for __cand in \
+    "$HOME/.local/bin/mi-mcp" \
+    "$HOME/.local/bin/memoryintelligence-mcp" \
+    "/opt/homebrew/bin/mi-mcp" \
+    "/usr/local/bin/mi-mcp"; do
+    if [[ -x "$__cand" ]]; then MI_MCP_BIN="$__cand"; break; fi
+  done
+fi
+if [[ -z "${MI_MCP_BIN:-}" || ! -x "$MI_MCP_BIN" ]]; then
+  echo "run-mi-mcp: mi-mcp binary not found — reinstall and re-wire:" >&2
+  echo "  pip install -U memoryintelligence-mcp && mi-mcp wire" >&2
+  exit 1
+fi
+exec "$MI_MCP_BIN" "$@"
 """
 
 
@@ -73,13 +99,25 @@ exec "__MI_MCP_BIN__" "$@"
 # ---------------------------------------------------------------------------
 
 def _surface_paths(home: Path) -> dict[str, Path]:
-    """Config file per Claude surface. NOTE: verify the `code`/`cursor` paths
+    """Config file per surface. NOTE: verify the `code`/`cursor`/`vscode` paths
     against your installed versions before relying on a live wire."""
     return {
         "desktop": home / "Library/Application Support/Claude/claude_desktop_config.json",
         "code": home / ".claude.json",
         "cursor": home / ".cursor/mcp.json",
+        # VS Code / GitHub Copilot (agent mode) read a dedicated user mcp.json.
+        "vscode": home / "Library/Application Support/Code/User/mcp.json",
     }
+
+
+def _surface_key(surface: str) -> str:
+    """Top-level JSON object that holds the server map for a surface.
+
+    Claude surfaces (desktop/code/cursor) use ``"mcpServers"``; VS Code / Copilot
+    use ``"servers"`` in their mcp.json. Per-surface so one wire pass writes the
+    right schema for each host.
+    """
+    return "servers" if surface == "vscode" else "mcpServers"
 
 
 def _wrapper_path(home: Path) -> Path:
@@ -183,16 +221,29 @@ def _resolve_key(home: Path) -> tuple[str, str]:
 # Commands
 # ---------------------------------------------------------------------------
 
-def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
+def do_wire(home: Path, surfaces: list[str], dry_run: bool,
+            capture_anywhere: bool | None = None) -> None:
     """Render the launch wrapper and register the server in each surface's config.
 
-    Shared by ``cmd_wire`` and ``cmd_setup``. Writes ``env: {}`` only — the key is
-    never placed in a config; the wrapper resolves it at launch.
+    Shared by ``cmd_wire`` and ``cmd_setup``. No API key is ever placed in a
+    config — the wrapper resolves it at launch.
+
+    ``capture_anywhere`` controls the ONE non-secret env value we ever write:
+    ``MI_MCP_OPT_IN_ALL=1``, and ONLY on the **desktop** entry. Claude Desktop is
+    a GUI app that spawns the server with no project cwd, so the per-folder
+    capture-consent gate can't apply there — capture from Desktop is therefore an
+    explicit surface-level opt-in. Code/Cursor open a real folder, so they keep
+    per-folder consent and never receive this flag.
+
+    It is tri-state, so the toggle is fully reversible and upgrade-safe:
+      • ``True``  → enable it (``--capture-anywhere``)
+      • ``False`` → disable it (``--no-capture-anywhere``)
+      • ``None``  → preserve whatever is already set (a plain re-wire never
+                    silently flips a capture choice the user made).
     """
     cfg_paths = _surface_paths(home)
     wrapper = _wrapper_path(home)
     bin_path = _mi_mcp_bin()
-    entry = {"command": str(wrapper), "args": [], "env": {}}
 
     print(f"{'DRY-RUN: ' if dry_run else ''}wiring {SERVER_KEY} MCP server")
     print(f"  wrapper → {wrapper}")
@@ -211,17 +262,42 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
             print(f"  ! unknown surface '{s}' (skipped)")
             continue
         cfg_path = cfg_paths[s]
+        cfg_key = _surface_key(s)
         cfg = _load_json(cfg_path)
-        servers = cfg.setdefault("mcpServers", {})
+        servers = cfg.setdefault(cfg_key, {})
         # Migrate: drop any pre-0.1.8 id (e.g. "memory-intelligence") so the
         # rename to "memoryintelligence" doesn't leave a duplicate/orphan entry.
         migrated = [k for k in LEGACY_SERVER_KEYS if servers.pop(k, None) is not None]
         if migrated:
             print(f"  {s:8} migrated id {', '.join(migrated)} → {SERVER_KEY}")
+        # Build this surface's entry. env carries at most the one non-secret
+        # opt-in flag, desktop-only. capture_anywhere is tri-state: True enables,
+        # False disables, None preserves the current setting (so a plain re-wire
+        # never silently flips a capture choice the user made).
+        env: dict[str, str] = {}
+        if s == "desktop":
+            prior = servers.get(SERVER_KEY)
+            prior_env = prior.get("env") if isinstance(prior, dict) else None
+            already_on = isinstance(prior_env, dict) and prior_env.get("MI_MCP_OPT_IN_ALL") == "1"
+            enabled = already_on if capture_anywhere is None else capture_anywhere
+            if enabled:
+                # Tag Desktop captures with a distinct provenance source so they're
+                # identifiable/reviewable apart from project (folder-scoped) captures.
+                env = {"MI_MCP_OPT_IN_ALL": "1", "MI_DEFAULT_SOURCE": "claude-desktop"}
+        entry = {"command": str(wrapper), "args": [], "env": env}
+        # VS Code / Copilot require an explicit transport type on each entry;
+        # Claude surfaces don't use one.
+        surface_entry = {"type": "stdio", **entry} if s == "vscode" else entry
+
         action = "update" if SERVER_KEY in servers else "add"
-        nochange = servers.get(SERVER_KEY) == entry
-        servers[SERVER_KEY] = entry
-        print(f"  {s:8} {cfg_path}  [{action}{' / no-change' if nochange else ''}]")
+        nochange = servers.get(SERVER_KEY) == surface_entry
+        servers[SERVER_KEY] = surface_entry
+        note = ("  ·  capture-anywhere ON" if env else "  ·  capture-anywhere off") if s == "desktop" else ""
+        print(f"  {s:8} {cfg_path}  [{action}{' / no-change' if nochange else ''}]{note}")
+        if env and s == "desktop":
+            print("           ⚠ ANY Claude Desktop chat under this macOS login can now write to your")
+            print("             MI account (captures are PII-redacted + tagged source=claude-desktop).")
+            print("             Don't enable on a shared login. Turn off: --no-capture-anywhere")
         if not dry_run:
             _atomic_write(cfg_path, json.dumps(cfg, indent=2) + "\n")
 
@@ -231,15 +307,20 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool) -> None:
 def cmd_wire(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="mi-mcp wire")
     ap.add_argument("--surfaces", default="desktop,code",
-                    help="comma list of: desktop, code, cursor (default: desktop,code)")
+                    help="comma list of: desktop, code, cursor, vscode (default: desktop,code)")
     ap.add_argument("--dry-run", action="store_true", help="print changes, write nothing")
+    ap.add_argument("--capture-anywhere", action=argparse.BooleanOptionalAction, default=None,
+                    help="allow mi_capture from Claude Desktop regardless of folder "
+                         "(sets MI_MCP_OPT_IN_ALL=1 on the desktop entry only; Code/Cursor "
+                         "keep per-folder consent). Use --no-capture-anywhere to turn it back "
+                         "off; omit both to preserve the current setting.")
     ap.add_argument("--home", default=os.environ.get("HOME"),
                     help="override HOME (for testing)")
     args = ap.parse_args(argv)
 
     home = Path(args.home)
     surfaces = [s.strip() for s in args.surfaces.split(",") if s.strip()]
-    do_wire(home, surfaces, args.dry_run)
+    do_wire(home, surfaces, args.dry_run, capture_anywhere=args.capture_anywhere)
     if not args.dry_run:
         print("\nNext steps:")
         print(f"  1. opt in a project:  echo \"$(pwd)\" >> {paths.mcp_config_dir(home=home) / 'opt-in-paths'}")
@@ -281,7 +362,7 @@ def cmd_doctor(argv: list[str]) -> int:
           critical=False)
 
     for s, p in _surface_paths(home).items():
-        servers = _load_json(p).get("mcpServers", {})
+        servers = _load_json(p).get(_surface_key(s), {})
         wired = SERVER_KEY in servers
         legacy = [k for k in LEGACY_SERVER_KEYS if k in servers]
         detail = str(p) if wired else "(not wired)"
@@ -301,7 +382,7 @@ def cmd_status(argv: list[str]) -> int:
 
     print("MCP wiring:")
     for s, p in _surface_paths(home).items():
-        wired = SERVER_KEY in _load_json(p).get("mcpServers", {})
+        wired = SERVER_KEY in _load_json(p).get(_surface_key(s), {})
         print(f"  {s:8} {'wired ✓  ' if wired else 'not wired'}   {p}")
 
     optin = paths.opt_in_paths_file(home=home)
@@ -453,11 +534,15 @@ def cmd_setup(argv: list[str]) -> int:
     ap.add_argument("--store", choices=["auto", "keychain", "file"], default="auto",
                     help="where to keep the key (auto: Keychain on macOS, ~/.memoryintelligence/.env elsewhere)")
     ap.add_argument("--surfaces", default="desktop,code",
-                    help="comma list of: desktop, code, cursor (default: desktop,code)")
+                    help="comma list of: desktop, code, cursor, vscode (default: desktop,code)")
     ap.add_argument("--opt-in", default=None, metavar="DIR",
                     help="directory to allow captures from (default: current directory)")
     ap.add_argument("--no-opt-in", action="store_true",
                     help="don't opt any directory in (captures stay disabled)")
+    ap.add_argument("--capture-anywhere", action=argparse.BooleanOptionalAction, default=None,
+                    help="also allow mi_capture from Claude Desktop regardless of folder "
+                         "(desktop entry only; Code/Cursor keep per-folder consent). "
+                         "--no-capture-anywhere turns it off.")
     ap.add_argument("--home", default=os.environ.get("HOME"),
                     help="override HOME (for testing)")
     args = ap.parse_args(argv)
@@ -516,7 +601,7 @@ def cmd_setup(argv: list[str]) -> int:
 
     # 3) wire the hosts
     print("  [2/4] wiring hosts")
-    do_wire(home, surfaces, dry_run=False)
+    do_wire(home, surfaces, dry_run=False, capture_anywhere=args.capture_anywhere)
     print()
 
     # 4) opt this directory in for capture (reads work everywhere regardless)

@@ -55,12 +55,12 @@ class MIClient:
             headers={
                 "Authorization": f"Bearer {config.api_key}",
                 "User-Agent": f"mi-mcp-server/{__version__}",
-                # X-MI-Source marks this as the MCP (agent) surface. The API uses
-                # it to apply context-aware PII redaction — agent/MCP reads are
-                # redacted, while the owner's reads in the developer portal are
-                # returned raw. Redaction is the fail-safe default for this
-                # surface; an explicit per-request `redact` override is a planned
-                # fast-follow once the server-side privacy fix lands.
+                # X-MI-Source marks this as an LLM/agent surface. The API ALWAYS
+                # redacts hard PII for agent surfaces — including the owner's own MCP —
+                # because an LLM must never receive unredacted memories. This is by
+                # design, not a limitation: the owner views raw values in the human dev
+                # portal, never through a model context. Do not change this to an
+                # owner-raw value. See core/security/export_scrub.AGENT_SOURCES.
                 "X-MI-Source": "mcp",
             },
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -96,7 +96,7 @@ class MIClient:
         self,
         content: str,
         *,
-        source: str = "mcp",
+        source: str | None = None,
         scope: str | None = None,
         scope_id: str | None = None,
         retention_policy: str | None = None,
@@ -106,7 +106,7 @@ class MIClient:
         """POST /v1/process — capture content into a UMO."""
         payload: dict[str, Any] = {
             "content": content,
-            "source": source,
+            "source": source or self._config.default_source,
             "scope": scope or self._config.default_scope,
         }
         if scope_id:

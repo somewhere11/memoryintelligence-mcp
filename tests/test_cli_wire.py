@@ -43,6 +43,76 @@ def test_wire_creates_wrapper_and_configs_without_key(tmp_path):
         assert "mi_sk_" not in cfg_path.read_text()
 
 
+def test_wire_vscode_uses_servers_key_and_stdio_type(tmp_path):
+    """VS Code / Copilot read a different schema than Claude: the server map is
+    under "servers" (not "mcpServers"), and each entry needs an explicit
+    "type": "stdio". Same wrapper, still no key written to the file."""
+    rc = run_admin("wire", ["--home", str(tmp_path), "--surfaces", "vscode"])
+    assert rc == 0
+    p = tmp_path / "Library/Application Support/Code/User/mcp.json"
+    cfg = json.loads(p.read_text())
+    assert "servers" in cfg and "mcpServers" not in cfg
+    entry = cfg["servers"][SERVER_KEY]
+    assert entry["type"] == "stdio"
+    assert entry["command"] == str(_wrapper(tmp_path))
+    assert entry["env"] == {}              # NO inline key
+    assert "mi_sk_" not in p.read_text()
+
+
+def test_wrapper_self_heals_when_baked_path_is_stale(tmp_path):
+    # Guard against the idea-vault failure mode: a config pointing at a single
+    # absolute path that later goes missing → silent spawn failure on every
+    # launch. The wrapper must try the wire-time path, then re-resolve via PATH
+    # and the common install dirs, then exit with one actionable error.
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    body = _wrapper(tmp_path).read_text()
+    assert "command -v mi-mcp" in body                       # PATH fallback
+    assert "$HOME/.local/bin/mi-mcp" in body                 # common install dir
+    assert "pip install -U memoryintelligence-mcp" in body   # actionable recovery
+    assert 'exec "$MI_MCP_BIN"' in body                      # execs the resolved bin
+    assert "mi_sk_" not in body                              # still never embeds the key
+
+
+def test_capture_anywhere_sets_desktop_env_only(tmp_path):
+    # --capture-anywhere opts capture in for Claude Desktop (no project cwd to
+    # scope to) but must NOT touch Cursor, which opens a real folder and keeps
+    # per-folder consent. And it is still never a key.
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop,cursor",
+                       "--capture-anywhere"])
+    desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
+    cursor = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"][SERVER_KEY]
+    # desktop opted in + provenance-tagged so captures are reviewable apart from projects
+    assert desktop["env"] == {"MI_MCP_OPT_IN_ALL": "1", "MI_DEFAULT_SOURCE": "claude-desktop"}
+    assert cursor["env"] == {}                            # cursor keeps consent
+    assert "mi_sk_" not in _desktop(tmp_path).read_text()  # still no key
+
+
+def test_capture_anywhere_preserved_on_plain_rewire(tmp_path):
+    # Once set, a later plain `wire` (no flag) must NOT silently disable it —
+    # otherwise an upgrade/re-wire would quietly turn capture back off.
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop", "--capture-anywhere"])
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])  # no flag
+    desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
+    assert desktop["env"] == {"MI_MCP_OPT_IN_ALL": "1", "MI_DEFAULT_SOURCE": "claude-desktop"}  # preserved
+
+
+def test_no_capture_anywhere_turns_it_off(tmp_path):
+    # The reversible half of the toggle: --no-capture-anywhere explicitly disables
+    # a previously-set desktop opt-in (distinct from a plain re-wire, which preserves).
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop", "--capture-anywhere"])
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop", "--no-capture-anywhere"])
+    desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
+    assert desktop["env"] == {}   # explicitly turned back off
+
+
+def test_wire_default_leaves_capture_gate_on(tmp_path):
+    # Default (no flag) must NOT bypass the consent gate — explicit opt-in is the
+    # ownership stance. Desktop env stays empty.
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
+    assert desktop["env"] == {}
+
+
 def test_wire_writes_zero_keys_anywhere(tmp_path):
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop,code,cursor"])
     # scan every file under the temp home for a key leak

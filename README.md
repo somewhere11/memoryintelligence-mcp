@@ -10,7 +10,7 @@
 Your assistant remembers what matters across every session — so you stop
 re-explaining context. What you tell it becomes **structured, searchable memory
 that you own**, and every recall **cites the memory it came from**. Works with
-**Claude Desktop, Claude Code, Cursor**, and any MCP client.
+**Claude Desktop, Claude Code, Cursor, VS Code / GitHub Copilot**, and any MCP client.
 
 ## ⏱️ Start in 30 seconds
 
@@ -27,6 +27,14 @@ That's it. `mi-mcp setup` stores your key **securely** (macOS Keychain, or a
 the current folder in for capture, and verifies it all — in one command. **No
 API key is ever written into a config file.**
 
+> **Capturing from Claude Desktop / claude.ai?** Capture is consent-gated **per
+> folder**, but Claude Desktop has no project folder — so saving from Desktop is an
+> explicit opt-in: `mi-mcp setup --capture-anywhere` (or `mi-mcp wire --surfaces
+> desktop --capture-anywhere`). Any Desktop chat can then save to your memory
+> (PII-redacted, tagged `source=claude-desktop` so it's easy to spot); Claude Code
+> and Cursor keep per-folder consent. **Don't enable it on a shared login.** Turn it
+> back off anytime with `--no-capture-anywhere`.
+
 **👉 [Get a free API key](https://memoryintelligence.io/portal)** (takes a minute) ·
 [Product](https://memoryintelligence.io) ·
 [PyPI](https://pypi.org/project/memoryintelligence-mcp/) ·
@@ -37,7 +45,7 @@ API key is ever written into a config file.**
 
 ---
 
-## ✅ What works today (0.1.7)
+## ✅ What works today (0.1.9)
 
 Honest status — this is beta, so here's exactly what's live:
 
@@ -144,14 +152,15 @@ provenance — runs in the service. Your API key authenticates to *your* account
 2. **stores it securely, outside every config** — macOS **Keychain**, or a
    `chmod 600 ~/.memoryintelligence/.env` keyfile on Linux/Windows (or with `--store file`);
 3. **wires** the server into Claude Desktop + Claude Code (`--surfaces` to choose
-   `desktop,code,cursor`), writing `env: {}` — **no key in any config file**;
+   `desktop,code,cursor,vscode` — `vscode` covers VS Code / GitHub Copilot), writing
+   `env: {}` — **no key in any config file**;
 4. **opts in** the current directory so captures are allowed there (reads work
    everywhere);
 5. **verifies** everything with `doctor`.
 
 ```bash
 mi-mcp setup                       # the happy path (interactive)
-mi-mcp setup --surfaces desktop,code,cursor
+mi-mcp setup --surfaces desktop,code,cursor,vscode   # vscode = VS Code / GitHub Copilot
 mi-mcp setup --store file          # force the ~/.memoryintelligence/.env keyfile (e.g. on Linux)
 mi-mcp setup --no-opt-in           # wire only; opt a folder in later
 ```
@@ -295,6 +304,26 @@ The launcher resolves the key in order: **inherited env → macOS Keychain →
 `~/.memoryintelligence/.env`** (the legacy `~/.mi-env` is still read).
 `security add-generic-password` is macOS-only, so on Linux/Windows use the keyfile
 or env var — never paste the key into an MCP client config.
+
+## VS Code / GitHub Copilot
+
+VS Code and GitHub Copilot (agent mode) read a **different** config than Claude: the
+server map lives under `"servers"` (not `"mcpServers"`) and each entry needs an explicit
+`"type": "stdio"`. `mi-mcp wire --surfaces vscode` writes the user config for you, or add
+it by hand — per-workspace in `.vscode/mcp.json` (commit it to share with your team), or
+globally via the Command Palette → *MCP: Open User Configuration*:
+
+```json
+{
+  "servers": {
+    "memoryintelligence": { "type": "stdio", "command": "mi-mcp" }
+  }
+}
+```
+
+Then open Copilot Chat, switch to **Agent** mode, and Start the server — the memory tools
+only appear in Agent mode. The key still resolves from your keychain at launch; nothing
+secret goes in `mcp.json`.
 
 ## Development
 

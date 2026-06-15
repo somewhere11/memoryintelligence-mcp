@@ -3,6 +3,29 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] — 2026-06-13
+
+### Added
+- **`--capture-anywhere` for `wire`/`setup`** — opt capture in for **Claude Desktop**,
+  which has no project folder for the per-folder consent gate to match. Sets
+  `MI_MCP_OPT_IN_ALL=1` on the **desktop entry only**; Claude Code and Cursor keep
+  per-folder consent. Default **off** (explicit opt-in is the ownership stance).
+  `--no-capture-anywhere` turns it back off; a plain re-wire preserves the choice.
+  Desktop captures are tagged `source=claude-desktop` (new `MI_DEFAULT_SOURCE`) so
+  they're identifiable apart from project captures, and `wire` prints a consent
+  warning while it's on. **No API key is ever written to a config.**
+
+### Changed
+- **Proactive-capture guidance tightened** — the server instructs the host to
+  capture *sparingly* (the user's own durable facts — not third parties' details,
+  venting, or half-formed ideas), reducing over-capture.
+
+### Fixed
+- **Launch wrapper self-heals a stale binary path** — `run-mi-mcp.sh` tries the
+  wire-time path first, then re-resolves via `PATH` and the common install dirs,
+  and exits with one actionable error if none resolve — instead of failing
+  silently when a reinstall/upgrade moves the `mi-mcp` binary.
+
 ## [0.1.8] — 2026-06-10
 
 ### Changed
