@@ -45,7 +45,7 @@ API key is ever written into a config file.**
 
 ---
 
-## ✅ What works today (0.1.9)
+## ✅ What works today (0.1.10)
 
 Honest status — this is beta, so here's exactly what's live:
 

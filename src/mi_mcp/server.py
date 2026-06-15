@@ -596,6 +596,15 @@ def create_server(config: MIConfig | None = None) -> Server:
                     return [TextContent(type="text", text=_fmt(result))]
 
                 case "mi_forget":
+                    # Destructive: honor the confirm gate the tool schema advertises.
+                    # Without confirm=true, return confirmation_required and delete
+                    # nothing — an injected or accidental call can't silently destroy.
+                    if not arguments.get("confirm"):
+                        return [TextContent(type="text", text=_fmt({
+                            "status": "confirmation_required",
+                            "umo_id": arguments["umo_id"],
+                            "message": "mi_forget permanently deletes this memory. Re-call with confirm=true to proceed.",
+                        }))]
                     result = await client.forget(umo_id=arguments["umo_id"])
                     return [TextContent(type="text", text=_fmt(result))]
 

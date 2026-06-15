@@ -3,6 +3,22 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] — 2026-06-15
+
+### Changed
+- **`mi_forget` now enforces its `confirm=true` gate.** The tool advertised a
+  confirmation step but the handler ignored it and deleted immediately. It now
+  returns `confirmation_required` (and deletes nothing) unless `confirm=true` is
+  passed — so an injected or accidental call can't silently destroy a memory.
+  (Pairs with the API-side delete fix: deletes now actually persist.)
+
+### Fixed
+- **Release CI is green on the public mirror again.** `test_contract_endpoints.py`
+  asserted the monorepo's `api/contract/openapi.json` exists; the mirror is a
+  subtree of `mcp-server/` only, so that file is absent and the test errored on
+  every release. It now **skips** when the contract isn't present (monorepo-only
+  test), instead of failing the mirror's build.
+
 ## [0.1.9] — 2026-06-13
 
 ### Added
