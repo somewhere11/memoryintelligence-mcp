@@ -3,6 +3,35 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.12] — 2026-06-16
+
+### Fixed
+- **The MCP client now retries on transient failures instead of failing the
+  first time the API is slow to wake.** The Railway `sdk-api` is a single small
+  instance that intermittently cold-starts or saturates (CPU-bound embedding +
+  pgvector rerank), and the client had a hard 30s budget with **no retry** — the
+  source of the "MCP keeps timing out" reports. Now:
+  - **Idempotent reads** (`mi_ask`, `mi_list`, `mi_explain`, `mi_verify`,
+    `mi_match`, account lookup) retry up to 2× on a read timeout or a transient
+    5xx (502/503/504), with exponential backoff (0.5s, 1.0s).
+  - **Writes** (`mi_capture`, `mi_upload`, `mi_forget`, batch) are **not**
+    read-retried — a timeout after the request body landed could double-apply.
+  - **Connection-level retries** (transport `retries=2`) cover the cold-start
+    `ConnectError` case for *every* verb, since no body is re-sent when the
+    connection never established.
+
+  This is a client-side reliability mitigation. The durable fix is local-vault
+  reads (no network round-trip on recall) — tracked separately.
+
+## [0.1.11] — 2026-06-16
+
+### Added
+- **`mi_upload` is now part of the default tool surface** — file-capture parity
+  with the API. The MCP previously exposed only text capture; `mi_upload` now
+  ships in the visible tool set and its description covers the full capture
+  matrix: structured files (csv/tsv/xlsx/json → typed claims), documents
+  (pdf/docx), images (→ OCR), and audio/video (→ transcription).
+
 ## [0.1.10] — 2026-06-15
 
 ### Changed

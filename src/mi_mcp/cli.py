@@ -31,9 +31,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import paths
+from . import __version__, paths
 from .config import load_opt_in_paths
 
 SERVER_KEY = "memoryintelligence"
@@ -465,6 +466,124 @@ def cmd_memory(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# backfill — one-time cloud → local-vault migration (dry-run by default)
+# ---------------------------------------------------------------------------
+
+# A <PERSON>/<…> marker in the OWNER export means the content was redacted at
+# INGEST (stored redacted). The owner export keeps person names, so a marker here
+# flags a memory whose raw text was never stored and cannot be recovered locally.
+_REDACTION_MARKERS = (
+    "<PERSON>", "<EMAIL>", "<PHONE>", "<SSN>", "<LOCATION>", "<ORG>",
+    "<CREDIT_CARD>", "[REDACTED]",
+)
+
+
+@dataclass
+class BackfillStats:
+    total: int = 0
+    approx_bytes: int = 0
+    with_raw: int = 0
+    redacted_at_source: int = 0
+    stream_error: str | None = None
+
+
+def _analyze_export(lines) -> BackfillStats:
+    """Tally an NDJSON export stream without writing anything.
+
+    Pure + side-effect-free so it's unit-testable with synthetic lines. Counts
+    UMOs, bytes, how many carry raw_text, and how many were already redacted at
+    ingest (a marker in the owner export = unrecoverable raw text).
+    """
+    st = BackfillStats()
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        st.approx_bytes += len(raw) + 1
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(obj, dict) and obj.get("_error"):
+            st.stream_error = str(obj.get("_error"))
+            continue
+        st.total += 1
+        if obj.get("raw_text"):
+            st.with_raw += 1
+        if any(m in line for m in _REDACTION_MARKERS):
+            st.redacted_at_source += 1
+    return st
+
+
+def cmd_backfill(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="mi-mcp backfill",
+        description="One-time migration of your cloud memories into the local .umo vault. "
+                    "Dry-run by default (writes nothing).",
+    )
+    ap.add_argument("--execute", action="store_true",
+                    help="actually write to the local vault (default: dry-run, writes nothing)")
+    ap.add_argument("--since", default=None, metavar="ISO8601",
+                    help="only backfill memories created on/after this timestamp")
+    ap.add_argument("--home", default=os.environ.get("HOME"))
+    args = ap.parse_args(argv)
+    home = Path(args.home)
+
+    key, src = _resolve_key(home)
+    if not key:
+        print("error: no MI_API_KEY resolvable — run `mi-mcp setup` first.", file=sys.stderr)
+        return 2
+    base_url = os.environ.get("MI_BASE_URL", "https://api.memoryintelligence.io").rstrip("/")
+
+    from . import vault
+    vault_dir = vault.vault_path()
+
+    mode = "EXECUTE" if args.execute else "DRY-RUN"
+    print(f"{mode}: backfill cloud → local vault")
+    print(f"  source: {base_url}/v1/memories/export?include_raw=true   (raw owner export · key {src})")
+    print(f"  vault : {vault_dir}")
+    print("  streaming export …")
+
+    import httpx
+    params = {"include_raw": "true"}
+    if args.since:
+        params["since"] = args.since
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": f"mi-mcp/{__version__}"}
+    try:
+        with httpx.stream(
+            "GET", f"{base_url}/v1/memories/export",
+            params=params, headers=headers,
+            timeout=httpx.Timeout(120.0, connect=10.0),
+        ) as resp:
+            if resp.status_code >= 400:
+                resp.read()
+                print(f"error: export HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+                return 1
+            stats = _analyze_export(resp.iter_lines())
+    except httpx.HTTPError as exc:
+        print(f"error: export request failed: {exc}", file=sys.stderr)
+        return 1
+
+    print()
+    print(f"  memories            : {stats.total}")
+    print(f"  approx size         : {stats.approx_bytes / 1024:.1f} KB")
+    print(f"  carry raw_text      : {stats.with_raw}")
+    print(f"  redacted at ingest  : {stats.redacted_at_source}  (raw never stored — unrecoverable)")
+    if stats.stream_error:
+        print(f"  ⚠ stream interrupted: {stats.stream_error} — counts are partial")
+
+    if not args.execute:
+        print("\n  DRY-RUN — nothing written.")
+        print("  --execute would: re-embed each locally (fastembed bge-small) → encrypt to")
+        print(f"  .umo with your owner key → write to {vault_dir} → build the local index.")
+        return 0
+
+    print("\n  NOTE: the --execute write path (re-embed → encrypt → vault.write_umo → index)")
+    print("  is the next increment and is not wired in this build. Dry-run validated the plan.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # setup — the one-command front door (store key → wire → opt-in → verify)
 # ---------------------------------------------------------------------------
 
@@ -634,6 +753,7 @@ _COMMANDS = {
     "doctor": cmd_doctor,
     "status": cmd_status,
     "memory": cmd_memory,
+    "backfill": cmd_backfill,
 }
 
 

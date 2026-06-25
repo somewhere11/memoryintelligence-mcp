@@ -8,6 +8,7 @@ that sends plaintext over HTTPS directly to the API.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -64,12 +65,26 @@ class MIClient:
                 "X-MI-Source": "mcp",
             },
             timeout=httpx.Timeout(30.0, connect=10.0),
+            # Connection-level retries are SAFE for every verb — httpx only retries
+            # when the connection never established (ConnectError/ConnectTimeout from
+            # the Railway sdk-api cold-start), so no request body is ever re-sent.
+            # Read-timeout / 5xx retries are handled per-request in _request(), gated
+            # on idempotency, because re-sending a write after the body landed could
+            # double-apply it.
+            transport=httpx.AsyncHTTPTransport(retries=2),
         )
 
     async def close(self):
         await self._http.aclose()
 
     # ----- helpers -----
+
+    # Transient HTTP statuses worth a retry on idempotent reads — gateway/
+    # unavailable/timeout from a saturated or cold-starting single instance.
+    _RETRYABLE_STATUS = frozenset({502, 503, 504})
+    # Idempotent reads get up to this many TOTAL attempts (1 initial + retries).
+    _IDEMPOTENT_ATTEMPTS = 3
+    _RETRY_BASE_DELAY = 0.5  # seconds; exponential: 0.5s, then 1.0s
 
     async def _request(
         self,
@@ -78,17 +93,49 @@ class MIClient:
         *,
         json: dict | None = None,
         params: dict | None = None,
+        idempotent: bool = False,
     ) -> dict[str, Any]:
-        """Make an API request and return the JSON response."""
-        resp = await self._http.request(method, path, json=json, params=params)
-        if resp.status_code >= 400:
+        """Make an API request and return the JSON response.
+
+        Idempotent reads (ask/list/explain/verify/match/account_info) are retried
+        on a read timeout or a transient 5xx, with exponential backoff. The Railway
+        sdk-api is a single small instance that intermittently cold-starts/saturates
+        (CPU-bound bge-small embed + pgvector rerank); the MCP previously had a hard
+        30s budget with NO retry — the "MCP keeps timing out" report. Writes
+        (capture/upload/forget/batch) are NOT read-retried: a timeout after the body
+        landed server-side could double-apply. Connection-level retries (set on the
+        transport) still cover the cold-start ConnectError case for every verb.
+        """
+        attempts = self._IDEMPOTENT_ATTEMPTS if idempotent else 1
+        for attempt in range(attempts):
+            is_last = attempt + 1 >= attempts
             try:
-                body = resp.json()
-                detail = body.get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise MIAPIError(resp.status_code, str(detail), f"{method} {path}")
-        return resp.json()
+                resp = await self._http.request(method, path, json=json, params=params)
+            except httpx.TimeoutException:
+                if is_last:
+                    raise
+                await asyncio.sleep(self._RETRY_BASE_DELAY * (2 ** attempt))
+                continue
+
+            if resp.status_code in self._RETRYABLE_STATUS and not is_last:
+                logger.warning(
+                    "MI API %s on %s %s — retrying (attempt %d/%d)",
+                    resp.status_code, method, path, attempt + 1, attempts,
+                )
+                await asyncio.sleep(self._RETRY_BASE_DELAY * (2 ** attempt))
+                continue
+
+            if resp.status_code >= 400:
+                try:
+                    body = resp.json()
+                    detail = body.get("detail", resp.text)
+                except Exception:
+                    detail = resp.text
+                raise MIAPIError(resp.status_code, str(detail), f"{method} {path}")
+            return resp.json()
+
+        # Unreachable: the loop returns or raises on the final attempt.
+        raise RuntimeError(f"retry loop exhausted without result: {method} {path}")
 
     # ----- Core operations -----
 
@@ -102,13 +149,24 @@ class MIClient:
         retention_policy: str | None = None,
         pii_handling: str | None = None,
         metadata: dict | None = None,
+        claim_granular: bool = True,
+        claim_level: str | None = None,
     ) -> dict[str, Any]:
-        """POST /v1/process — capture content into a UMO."""
+        """POST /v1/process — capture content into a UMO.
+
+        claim_granular defaults True (#446, Decision B — atom = the CLAIM): a long
+        capture persists as a parent + one child per claim, each independently
+        recallable. Short single-claim captures stay a single UMO (the server's
+        <=1-claim guard), so this is safe to leave on by default.
+        """
         payload: dict[str, Any] = {
             "content": content,
             "source": source or self._config.default_source,
             "scope": scope or self._config.default_scope,
+            "claim_granular": claim_granular,
         }
+        if claim_level:
+            payload["claim_level"] = claim_level
         if scope_id:
             payload["scope_id"] = scope_id
         if retention_policy:
@@ -164,7 +222,9 @@ class MIClient:
         if entities:
             payload["entities"] = entities
 
-        return await self._request("POST", "/v1/memories/query", json=payload)
+        return await self._request(
+            "POST", "/v1/memories/query", json=payload, idempotent=True
+        )
 
     async def list_memories(
         self,
@@ -177,17 +237,17 @@ class MIClient:
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if scope:
             params["scope"] = scope
-        return await self._request("GET", "/v1/memories", params=params)
+        return await self._request("GET", "/v1/memories", params=params, idempotent=True)
 
     async def explain(self, umo_id: str, *, level: str = "full") -> dict[str, Any]:
         """GET /v1/memories/{id}/explain — UMO introspection."""
         return await self._request(
-            "GET", f"/v1/memories/{umo_id}/explain", params={"level": level}
+            "GET", f"/v1/memories/{umo_id}/explain", params={"level": level}, idempotent=True
         )
 
     async def verify(self, umo_id: str) -> dict[str, Any]:
         """GET /v1/memories/{id}/proof — provenance verification."""
-        return await self._request("GET", f"/v1/memories/{umo_id}/proof")
+        return await self._request("GET", f"/v1/memories/{umo_id}/proof", idempotent=True)
 
     async def forget(self, umo_id: str) -> dict[str, Any]:
         """DELETE /v1/memories/{id} — delete a UMO with receipt."""
@@ -215,6 +275,7 @@ class MIClient:
                 "explain": explain,
                 "threshold": threshold,
             },
+            idempotent=True,
         )
 
     async def batch(
@@ -268,4 +329,4 @@ class MIClient:
 
     async def account_info(self) -> dict[str, Any]:
         """GET /v1/accounts/me — get current account info and key status."""
-        return await self._request("GET", "/v1/accounts/me")
+        return await self._request("GET", "/v1/accounts/me", idempotent=True)

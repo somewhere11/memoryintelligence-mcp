@@ -42,7 +42,10 @@ logger = logging.getLogger("mi_mcp")
 # surface reduces agent decision-noise; the hidden tools stay callable by name.
 # mi_forget is exposed so owners can delete their own memories; it is guarded by
 # confirm=true + an ownership-checked soft-delete with a recovery grace window.
-V0_VISIBLE_TOOLS = frozenset({"mi_capture", "mi_ask", "mi_list", "mi_forget"})
+# mi_upload is exposed so the MCP can capture FILES (csv/xlsx/json → structured
+# claims, pdf/docx, images→OCR, audio/video→transcription) — parity with the API's
+# capture surface, not just text via mi_capture. Same write-consent gate applies.
+V0_VISIBLE_TOOLS = frozenset({"mi_capture", "mi_upload", "mi_ask", "mi_list", "mi_forget"})
 
 # Write tools — gated by the cwd consent allowlist (~/.memoryintelligence/mcp/opt-in-paths, Story 8).
 # Read tools are never gated; reading your own memory is always safe.
@@ -93,6 +96,65 @@ def _fmt_untrusted(data: Any) -> str:
 def _error_text(e: MIAPIError) -> list[TextContent]:
     """Format an API error into MCP text content."""
     return [TextContent(type="text", text=f"Error ({e.status_code}): {e.detail}")]
+
+
+# =============================================================================
+# Output shaping — project API envelopes down to the minimal agent shape
+# =============================================================================
+# The API wraps results in a full envelope (request_id, query_hash, meta) and
+# each hit carries a score decomposition, entity arrays, and a `content_text`
+# that DUPLICATES `summary`. An agent only needs, per hit, what it takes to
+# recall and cite: a summary, where it came from, the id, and the score.
+# Dumping the raw envelope is ~86% transport noise (edge test T8); shaping is
+# ~5x fewer tokens with no capability loss. Each shaper returns the input
+# UNCHANGED when it isn't the expected success shape, so errors/odd payloads
+# still surface.
+
+def _shape_ask(result: Any) -> Any:
+    """Project a /v1/memories/query response to ``[{umo_id, summary, source, score}]``."""
+    if not isinstance(result, dict):
+        return result
+    data = result.get("data")
+    if not isinstance(data, dict) or "results" not in data:
+        return result
+    shaped = []
+    for r in data.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        shaped.append({
+            "umo_id":  r.get("umo_id"),
+            # content_text duplicates summary; fall back to it only if summary is empty.
+            "summary": r.get("summary") or r.get("content_text"),
+            "source":  r.get("source"),
+            "score":   r.get("score"),
+        })
+    return shaped
+
+
+def _shape_list(result: Any) -> Any:
+    """Project a /v1/memories (list) response to a compact per-item shape.
+
+    Mirrors :func:`_shape_ask` for the listing surface — drops the pagination
+    envelope and the per-item entity arrays / quality_score / metadata, keeping
+    just what an agent scans a list for.
+    """
+    if not isinstance(result, dict):
+        return result
+    data = result.get("data")
+    if not isinstance(data, dict) or "items" not in data:
+        return result
+    shaped = []
+    for it in data.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        shaped.append({
+            "umo_id":     it.get("umo_id"),
+            "summary":    it.get("summary"),
+            "source":     it.get("source"),
+            "topics":     it.get("topics"),
+            "created_at": it.get("created_at"),
+        })
+    return shaped
 
 
 # =============================================================================
@@ -426,9 +488,17 @@ def create_server(config: MIConfig | None = None) -> Server:
             Tool(
                 name="mi_upload",
                 description=(
-                    "Upload a media file (audio, video, image, PDF) for processing into "
-                    "a UMO. The file is transcribed/OCR'd, then the text goes through "
-                    "the standard intelligence pipeline."
+                    "Capture a FILE into MemoryIntelligence — the file-based counterpart "
+                    "to mi_capture (which is text-only). Use this whenever the user points "
+                    "at a file/spreadsheet/document/recording instead of pasting text. The "
+                    "full upload surface the API supports:\n"
+                    "  • Data — csv, tsv, xlsx, json, jsonl → DETERMINISTIC structured "
+                    "claims: each row/record becomes ⟨row-key, column, typed-cell⟩ "
+                    "(numbers/money/dates/emails typed), NOT a re-NLP'd text blob.\n"
+                    "  • Documents — pdf, docx, txt, md → text extraction → the pipeline.\n"
+                    "  • Images — png, jpg, gif, webp, … → OCR.\n"
+                    "  • Audio/Video — mp3, wav, m4a, mp4, mov, … → transcription.\n"
+                    "Returns the created UMO with its ID."
                 ),
                 inputSchema={
                     "type": "object",
@@ -436,7 +506,11 @@ def create_server(config: MIConfig | None = None) -> Server:
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "Absolute path to the file to upload.",
+                            "description": (
+                                "Absolute path to the file to upload. Supported: csv/tsv/"
+                                "xlsx/json/jsonl, pdf/docx/txt/md, png/jpg/gif/webp, "
+                                "mp3/wav/m4a/mp4/mov."
+                            ),
                         },
                         "scope": {
                             "type": "string",
@@ -503,9 +577,10 @@ def create_server(config: MIConfig | None = None) -> Server:
             _t.annotations = _TOOL_ANNOTATIONS.get(_t.name)
         if config.full_tools:
             return all_tools
-        # v0 default: only the 3 core tools are visible (resolves #256).
-        # MI_MCP_FULL=1 exposes all 10. Hidden tools remain callable by name —
-        # this is decision-noise narrowing, not an auth gate.
+        # v0 default: only the core tools (V0_VISIBLE_TOOLS — capture, upload, ask,
+        # list, forget) are visible (resolves #256). MI_MCP_FULL=1 exposes all 10.
+        # Hidden tools remain callable by name — decision-noise narrowing, not an
+        # auth gate.
         return [t for t in all_tools if t.name in V0_VISIBLE_TOOLS]
 
     # =========================================================================
@@ -550,6 +625,7 @@ def create_server(config: MIConfig | None = None) -> Server:
 
             match name:
                 case "mi_capture":
+                    # Claim-granular by default (#446); an agent can opt out per call.
                     result = await client.capture(
                         content=arguments["content"],
                         source=arguments.get("source"),
@@ -558,6 +634,8 @@ def create_server(config: MIConfig | None = None) -> Server:
                         retention_policy=arguments.get("retention_policy"),
                         pii_handling=arguments.get("pii_handling"),
                         metadata=arguments.get("metadata"),
+                        claim_granular=arguments.get("claim_granular", True),
+                        claim_level=arguments.get("claim_level"),
                     )
                     return [TextContent(type="text", text=_fmt(result))]
 
@@ -574,7 +652,7 @@ def create_server(config: MIConfig | None = None) -> Server:
                         topics=arguments.get("topics"),
                         entities=arguments.get("entities"),
                     )
-                    return [TextContent(type="text", text=_fmt_untrusted(result))]
+                    return [TextContent(type="text", text=_fmt_untrusted(_shape_ask(result)))]
 
                 case "mi_list":
                     result = await client.list_memories(
@@ -582,7 +660,7 @@ def create_server(config: MIConfig | None = None) -> Server:
                         offset=arguments.get("offset", 0),
                         scope=arguments.get("scope"),
                     )
-                    return [TextContent(type="text", text=_fmt_untrusted(result))]
+                    return [TextContent(type="text", text=_fmt_untrusted(_shape_list(result)))]
 
                 case "mi_explain":
                     result = await client.explain(
@@ -672,7 +750,7 @@ def create_server(config: MIConfig | None = None) -> Server:
 
             if uri_str == "mi://memories":
                 result = await client.list_memories(limit=50)
-                return _fmt_untrusted(result)
+                return _fmt_untrusted(_shape_list(result))
 
             if uri_str.startswith("mi://memory/"):
                 umo_id = uri_str.removeprefix("mi://memory/")
