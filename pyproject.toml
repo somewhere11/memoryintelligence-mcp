@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memoryintelligence-mcp"
-version = "0.1.12"
+version = "0.2.0"
 description = "MCP server for MemoryIntelligence — give Claude a memory you own, set up in one command"
 readme = "README.md"
 license = "MIT"
@@ -43,6 +43,9 @@ Documentation = "https://memoryintelligence.io/docs/api-reference"
 local = [
     "cryptography>=42.0,<46",
     "numpy>=1.24,<3",
+    # Local-first ONNX embedder (bge-small) for network-free reads. Pulls
+    # onnxruntime — real weight, hence kept out of the thin base install.
+    "fastembed>=0.3.0,<1.0",
 ]
 dev = [
     "pytest>=8.0",
@@ -50,6 +53,7 @@ dev = [
     "ruff>=0.4.0",
     "cryptography>=42.0,<46",
     "numpy>=1.24,<3",
+    "fastembed>=0.3.0,<1.0",
 ]
 
 [project.scripts]

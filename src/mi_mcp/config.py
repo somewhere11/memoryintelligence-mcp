@@ -37,6 +37,11 @@ class MIConfig:
     # Tool surface — v0 exposes 3 tools by default; MI_MCP_FULL=1 exposes all 10 (#256).
     full_tools: bool = False
 
+    # Local reads (#432 Phase 1): when True AND a built index sidecar exists, route
+    # mi_ask/mi_list to the on-device vault index (network-free) and fall back to
+    # cloud on any error. Opt-in; cloud stays the default. Set MI_MCP_LOCAL=1.
+    local_mode: bool = False
+
     @classmethod
     def from_env(cls) -> MIConfig:
         """Build config from environment variables.
@@ -51,6 +56,8 @@ class MIConfig:
             MI_HOST            — bind host for SSE/HTTP (default: 127.0.0.1, loopback only)
             MI_PORT            — bind port for SSE/HTTP (default: 8100)
             MI_MCP_FULL        — "1" exposes all 10 tools; otherwise only the core set (#256)
+            MI_MCP_LOCAL       — "1" routes mi_ask/mi_list to the local vault index when
+                                 one is built (network-free); falls back to cloud on error
         """
         api_key = os.environ.get("MI_API_KEY", "")
         if not api_key:
@@ -73,6 +80,7 @@ class MIConfig:
             host=os.environ.get("MI_HOST", cls.host),
             port=int(os.environ.get("MI_PORT", str(cls.port))),
             full_tools=os.environ.get("MI_MCP_FULL") == "1",
+            local_mode=os.environ.get("MI_MCP_LOCAL") == "1",
         )
 
 

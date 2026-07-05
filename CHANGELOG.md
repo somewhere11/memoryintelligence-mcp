@@ -3,6 +3,27 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-07-04
+
+### Added — the local vault (Path A), previously built on `main` but never released
+The published `0.1.12` shipped as a thin cloud client; the entire local-vault stack
+landed on `main` afterward **under the same version number** and was never cut into a
+release. This release publishes it (release-hygiene fix — no new code, just a version
+bump over what `main` already carried).
+
+- **`backfill --execute` now writes the local vault** (`cli.py`): the cloud → local
+  migration re-embeds each memory locally, encrypts to the owner's key, and writes a
+  signed `.umo`. The prior published build's `--execute` was a dry-run stub.
+- **Offline reads** — `local_index.py` + `localreads.py` + `indexer.py`: a flat-numpy
+  cosine index over the decrypted vault, mirroring the hosted ranking, so `mi_ask` works
+  network-free (needs the `[local]` extra: `cryptography` + `numpy`).
+- **`mi-mcp index {build,stat,path}`** — build/inspect the local vector index.
+- **On-device redaction** (`scrub.py`) applied on the local read path.
+- **`embedder.py`** — local bge-small embeddings for backfill + query.
+- Note (MI#653): `mi-mcp` still defaults its vault to `~/MemoryIntelligence`; the
+  MemorySpace Desktop vault is `~/Somewhere`. Until `wire`/`setup` sets
+  `MI_VAULT=~/Somewhere`, point it there manually so the two surfaces share one vault.
+
 ## [0.1.12] — 2026-06-16
 
 ### Fixed

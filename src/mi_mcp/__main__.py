@@ -29,13 +29,27 @@ def main():
     # Admin subcommands: `mi-mcp {setup|init|wire|doctor|status|memory}`. Bare
     # `mi-mcp` (no subcommand) runs the server — that's how the MCP host spawns it.
     argv = sys.argv[1:]
-    if argv and argv[0] in ("setup", "init", "wire", "doctor", "status", "memory"):
+    if argv and argv[0] in (
+        "setup", "init", "wire", "doctor", "status", "memory", "backfill", "index",
+    ):
         from .cli import run_admin
         sys.exit(run_admin(argv[0], argv[1:]))
 
     parser = argparse.ArgumentParser(
         prog="mi-mcp",
         description="MemoryIntelligence MCP Server",
+        # Admin subcommands are dispatched before argparse (above), so they don't
+        # appear as subparsers. List them here so `--help` isn't misleading — a new
+        # user checking `--help` for `setup` shouldn't conclude the docs are stale.
+        epilog=(
+            "setup commands (run these first, not shown above):\n"
+            "  mi-mcp setup     store your API key + wire + opt-in + verify (one command)\n"
+            "  mi-mcp wire      wire into Claude Desktop / Code / Cursor\n"
+            "  mi-mcp doctor    verify install, key resolution, and wiring\n"
+            "  mi-mcp status    show wired surfaces + opt-in allowlist\n"
+            "\nGet a key at https://memoryintelligence.io/portal, then run `mi-mcp setup`."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--version",

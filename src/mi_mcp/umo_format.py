@@ -35,6 +35,14 @@ from dataclasses import dataclass
 
 MAGIC = b"UMO!"  # 0x554D4F21
 FORMAT_VERSION = 0x0100  # canonical FEAT-0051 v1.0
+
+# Shared cross-surface conventions (the unified local home). The Rust desktop app
+# ("Somewhere") writes these same values, so files written by the MCP and by the
+# desktop are mutually readable in one vault. owner_did is a plaintext metadata
+# label only (NOT used in decryption — that's the X25519 key), so a fixed value is
+# safe and keeps the home consistent.
+LOCAL_OWNER_DID = "did:mi:owner-local"
+FORMAT_VERSION_STR = "0x0100"  # string form the desktop stores in public_metadata
 _HKDF_INFO = b"umo-cek-wrap-v1"
 _SIG_LEN = 64
 _IV_LEN = 12

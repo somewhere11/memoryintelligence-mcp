@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Any
 
 from mcp.server import Server
@@ -32,6 +33,7 @@ from mcp.types import (
     ToolAnnotations,
 )
 
+from . import localreads
 from .client import MIClient, MIAPIError
 from .config import MIConfig, is_cwd_opted_in
 
@@ -125,7 +127,8 @@ def _shape_ask(result: Any) -> Any:
             "umo_id":  r.get("umo_id"),
             # content_text duplicates summary; fall back to it only if summary is empty.
             "summary": r.get("summary") or r.get("content_text"),
-            "source":  r.get("source"),
+            # #538: the API omits source when it's the default — absent means "api".
+            "source":  r.get("source") or "api",
             "score":   r.get("score"),
         })
     return shaped
@@ -155,6 +158,46 @@ def _shape_list(result: Any) -> Any:
             "created_at": it.get("created_at"),
         })
     return shaped
+
+
+# =============================================================================
+# Read backend routing (local vs cloud) — module-level so it's directly testable
+# =============================================================================
+# The local path serves from the on-device index when MI_MCP_LOCAL=1 and an index
+# exists; it falls back to cloud on ANY local error (and routes advanced filters,
+# which local v0 doesn't handle, straight to cloud). This is the safety net for
+# going local — kept out of the call_tool closure so it can be unit-tested.
+
+async def _route_ask(config: MIConfig, client: MIClient, arguments: dict) -> Any:
+    limit = arguments.get("limit", 10)
+    offset = arguments.get("offset", 0)
+    advanced = any(arguments.get(k) for k in ("date_from", "date_to", "topics", "scope_id"))
+    if localreads.available(config) and not advanced:
+        try:
+            return localreads.ask_local(
+                arguments["query"], limit=limit, offset=offset,
+                entities=arguments.get("entities"),
+            )
+        except Exception as e:
+            logger.warning("local mi_ask failed (%s) — falling back to cloud", e)
+    return await client.ask(
+        query=arguments["query"], limit=limit, offset=offset,
+        explain=arguments.get("explain", "none"), scope=arguments.get("scope"),
+        scope_id=arguments.get("scope_id"), date_from=arguments.get("date_from"),
+        date_to=arguments.get("date_to"), topics=arguments.get("topics"),
+        entities=arguments.get("entities"),
+    )
+
+
+async def _route_list(config: MIConfig, client: MIClient, arguments: dict) -> Any:
+    limit = arguments.get("limit", 20)
+    offset = arguments.get("offset", 0)
+    if localreads.available(config):
+        try:
+            return localreads.list_local(limit=limit, offset=offset)
+        except Exception as e:
+            logger.warning("local mi_list failed (%s) — falling back to cloud", e)
+    return await client.list_memories(limit=limit, offset=offset, scope=arguments.get("scope"))
 
 
 # =============================================================================
@@ -212,6 +255,18 @@ def create_server(config: MIConfig | None = None) -> Server:
             "MI_MCP_OPT_IN_ALL=1 — capture consent gate BYPASSED (all cwds allowed)"
         )
 
+    # Warm the local embedder in the background when local reads are enabled, so the
+    # FIRST mi_ask doesn't pay the model-load cost inside the request — otherwise the
+    # cold-start latency local reads exist to kill reappears on query #1 (review H1).
+    if localreads.available(config):
+        def _warm_local() -> None:
+            try:
+                from . import embedder
+                embedder.warm()
+            except Exception as e:  # missing extra / load failure — cloud still works
+                logger.info("local embedder warm skipped: %s", e)
+        threading.Thread(target=_warm_local, daemon=True).start()
+
     # =========================================================================
     # TOOL DEFINITIONS
     # =========================================================================
@@ -238,8 +293,11 @@ def create_server(config: MIConfig | None = None) -> Server:
                         "source": {
                             "type": "string",
                             "description": (
-                                "Where this content came from (e.g., 'slack', 'email', "
-                                "'conversation', 'notes'). Default: 'mcp'."
+                                "Content-context label for what kind of content this is "
+                                "(e.g., 'conversation', 'notes', 'meeting'). Free-text; "
+                                "stored as the memory's source label. It does NOT set the "
+                                "capture surface — the server identifies the platform from "
+                                "the connection itself. Default: 'mcp'."
                             ),
                             "default": "mcp",
                         },
@@ -590,6 +648,19 @@ def create_server(config: MIConfig | None = None) -> Server:
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         try:
+            # #600: forward the host identity (initialize clientInfo.name) as
+            # X-MI-Client so captures resolve channel agent:<client> instead of
+            # the transport-generic agent:mcp. Best-effort — absent context or
+            # clientInfo leaves the header unset and the API falls back.
+            try:
+                _ci = getattr(
+                    server.request_context.session.client_params, "clientInfo", None
+                )
+                if _ci is not None and getattr(_ci, "name", None):
+                    client.set_client_identity(_ci.name)
+            except Exception:
+                pass
+
             # Tool-surface enforcement: hidden tools (only listed when MI_MCP_FULL=1)
             # are NOT callable by name in the default surface. Without this, list_tools
             # narrowing is UX-only and a destructive tool like mi_forget stays reachable.
@@ -640,26 +711,11 @@ def create_server(config: MIConfig | None = None) -> Server:
                     return [TextContent(type="text", text=_fmt(result))]
 
                 case "mi_ask":
-                    result = await client.ask(
-                        query=arguments["query"],
-                        limit=arguments.get("limit", 10),
-                        offset=arguments.get("offset", 0),
-                        explain=arguments.get("explain", "none"),
-                        scope=arguments.get("scope"),
-                        scope_id=arguments.get("scope_id"),
-                        date_from=arguments.get("date_from"),
-                        date_to=arguments.get("date_to"),
-                        topics=arguments.get("topics"),
-                        entities=arguments.get("entities"),
-                    )
+                    result = await _route_ask(config, client, arguments)
                     return [TextContent(type="text", text=_fmt_untrusted(_shape_ask(result)))]
 
                 case "mi_list":
-                    result = await client.list_memories(
-                        limit=arguments.get("limit", 20),
-                        offset=arguments.get("offset", 0),
-                        scope=arguments.get("scope"),
-                    )
+                    result = await _route_list(config, client, arguments)
                     return [TextContent(type="text", text=_fmt_untrusted(_shape_list(result)))]
 
                 case "mi_explain":

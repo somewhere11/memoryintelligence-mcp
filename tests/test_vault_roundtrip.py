@@ -45,6 +45,24 @@ def test_master_key_loads_from_env(owner_env):
     assert keys.public_key_b64(loaded) == keys.public_key_b64(owner_env)
 
 
+def test_owner_did_is_stable_and_namespaced(owner_env):
+    did = keys.owner_did()
+    assert did.startswith("did:mi:key:")
+    assert did == keys.owner_did()  # deterministic from the master public key
+
+
+def test_local_signing_key_round_trips_from_env(monkeypatch):
+    signing = ed25519.Ed25519PrivateKey.generate()
+    raw = signing.private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )
+    monkeypatch.setenv("MI_LOCAL_SIGNING_KEY", base64.b64encode(raw).decode())
+    loaded = keys.load_local_signing_key()
+    assert keys.local_signing_public_key_b64(loaded) == keys.local_signing_public_key_b64(signing)
+
+
 def test_full_roundtrip(owner_env):
     owner_priv = keys.load_master_private_key()
     owner_pub = owner_priv.public_key()

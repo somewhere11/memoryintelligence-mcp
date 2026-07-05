@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -61,13 +62,13 @@ class MIClient:
                 # because an LLM must never receive unredacted memories. This is by
                 # design, not a limitation: the owner views raw values in the human dev
                 # portal, never through a model context. Do not change this to an
-                # owner-raw value. See core/security/export_scrub.AGENT_SOURCES.
+                # owner-raw value. It mirrors the server-side agent-surface redaction policy.
                 "X-MI-Source": "mcp",
             },
             timeout=httpx.Timeout(30.0, connect=10.0),
             # Connection-level retries are SAFE for every verb — httpx only retries
             # when the connection never established (ConnectError/ConnectTimeout from
-            # the Railway sdk-api cold-start), so no request body is ever re-sent.
+            # the hosted API's cold-start), so no request body is ever re-sent.
             # Read-timeout / 5xx retries are handled per-request in _request(), gated
             # on idempotency, because re-sending a write after the body landed could
             # double-apply it.
@@ -76,6 +77,19 @@ class MIClient:
 
     async def close(self):
         await self._http.aclose()
+
+    def set_client_identity(self, name: str) -> None:
+        """Forward the MCP host identity as the X-MI-Client header (#600).
+
+        `name` is the initialize handshake's clientInfo.name (e.g.
+        "claude-code"). The API uses it to resolve the provenance channel's
+        platform slot — agent:claude-code instead of the transport-generic
+        agent:mcp. Normalized to a registry-comparable key; empty names are
+        a no-op, and unregistered ones fall back to agent:mcp server-side.
+        """
+        normalized = re.sub(r"[^a-z0-9._-]+", "-", (name or "").strip().lower()).strip("-")[:40]
+        if normalized:
+            self._http.headers["X-MI-Client"] = normalized
 
     # ----- helpers -----
 
@@ -98,8 +112,8 @@ class MIClient:
         """Make an API request and return the JSON response.
 
         Idempotent reads (ask/list/explain/verify/match/account_info) are retried
-        on a read timeout or a transient 5xx, with exponential backoff. The Railway
-        sdk-api is a single small instance that intermittently cold-starts/saturates
+        on a read timeout or a transient 5xx, with exponential backoff. The hosted
+        API can intermittently cold-start or saturate
         (CPU-bound bge-small embed + pgvector rerank); the MCP previously had a hard
         30s budget with NO retry — the "MCP keeps timing out" report. Writes
         (capture/upload/forget/batch) are NOT read-retried: a timeout after the body

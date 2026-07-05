@@ -83,6 +83,17 @@ def wrapper_path(create: bool = False, home: Path | None = None) -> Path:
     return mcp_config_dir(create=create, home=home) / "run-mi-mcp.sh"
 
 
+def local_index_path(create: bool = False, home: Path | None = None) -> Path:
+    """The local vector-index sidecar (``~/.memoryintelligence/mcp/local_index.json``).
+
+    Lives in the hidden trusted dir alongside the rest of the MCP plumbing. The
+    sidecar holds summaries (PII) + embeddings, so it relies on device full-disk
+    encryption (FileVault — also the school-tier install requirement) at rest for
+    v0; encrypting it with the owner key is the next hardening (see ``indexer.py``).
+    """
+    return mcp_config_dir(create=create, home=home) / "local_index.json"
+
+
 def keyfile_path(home: Path | None = None) -> Path:
     """Preferred on-disk keyfile (``~/.memoryintelligence/.env``, chmod 600) — the
     cross-platform fallback when there is no Keychain. Shared by mcp + sdk."""

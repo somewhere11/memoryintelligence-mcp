@@ -42,10 +42,17 @@ API key is ever written into a config file.**
 
 > Prefer no install? `uvx memoryintelligence-mcp --help` runs it via `uv` with
 > nothing to install. (You'll still run `mi-mcp setup` once to store your key + wire.)
+>
+> **Note on `--help`:** the admin subcommands (`setup`, `wire`, `doctor`, `status`)
+> are dispatched before the argument parser, so they're listed in `--help`'s footer
+> rather than as standard subcommands — `mi-mcp setup` is real even though it isn't a
+> `--help` subparser. For persistent use prefer `uv tool install memoryintelligence-mcp`
+> over bare `uvx`: the launcher Claude Desktop spawns resolves the binary from `PATH` /
+> `~/.local/bin`, not `uvx`'s ephemeral cache.
 
 ---
 
-## ✅ What works today (0.1.10)
+## ✅ What works today (0.2.0)
 
 Honest status — this is beta, so here's exactly what's live:
 

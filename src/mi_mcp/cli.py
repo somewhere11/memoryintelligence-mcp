@@ -6,11 +6,14 @@ a wrapper (``~/.memoryintelligence/mcp/run-mi-mcp.sh``) that resolves
 ``MI_API_KEY`` at launch from the macOS Keychain, then the on-disk keyfile,
 else fails. So a leaked config file exposes nothing.
 
-  setup  — one command: store the key, wire hosts, opt in this dir, verify.
-           (alias: ``init``). The frictionless front door for new users.
-  wire   — register the server in Claude config(s); no key in any file.
-  doctor — verify wiring + key resolvability (prints prefix only, never the key).
-  status — show which surfaces are wired + the capture opt-in allowlist.
+  setup    — one command: store the key, wire hosts, opt in this dir, verify.
+             (alias: ``init``). The frictionless front door for new users.
+  wire     — register the server in Claude config(s); no key in any file.
+  doctor   — verify wiring + key resolvability (prints prefix only, never the key).
+  status   — show which surfaces are wired + the capture opt-in allowlist.
+  memory   — inspect the local .umo vault (ls|open|verify|rm|path).
+  backfill — migrate cloud memories into the local .umo vault (re-embed locally).
+  index    — build/inspect the local vector index (build|path|stat).
 
 The key is stored OUTSIDE every config — in the macOS Keychain (``security``)
 or, on Linux/Windows (or by choice), a ``chmod 600 ~/.memoryintelligence/.env``
@@ -324,7 +327,12 @@ def cmd_wire(argv: list[str]) -> int:
     do_wire(home, surfaces, args.dry_run, capture_anywhere=args.capture_anywhere)
     if not args.dry_run:
         print("\nNext steps:")
-        print(f"  1. opt in a project:  echo \"$(pwd)\" >> {paths.mcp_config_dir(home=home) / 'opt-in-paths'}")
+        # "opt in a directory" reads as "put a file in a folder" to a new user — it's
+        # neither. It records a project path in an allowlist; nothing is placed in the
+        # folder. Show it as a concrete cd-then-command so the mental model is right.
+        print("  1. allow captures from a project (no file is placed — it records the path):")
+        print("       cd ~/Projects/my-app")
+        print(f"       mi-mcp setup --opt-in \"$(pwd)\"     # or: echo \"$(pwd)\" >> {paths.mcp_config_dir(home=home) / 'opt-in-paths'}")
         print("  2. restart Claude (MCP servers load at startup)")
         print("  3. mi-mcp doctor   # verify")
     return 0
@@ -347,6 +355,15 @@ def cmd_doctor(argv: list[str]) -> int:
     bin_path = _mi_mcp_bin()
     check("mi-mcp binary", Path(bin_path).exists(), bin_path)
 
+    # PATH self-check — the #1 post-`uv tool install` stall: the shim exists but its
+    # dir isn't on PATH, so `mi-mcp` "isn't found" until the user notices uv's warning.
+    bin_dir = str(Path(bin_path).parent)
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    on_path = bin_dir in path_dirs
+    check("binary on PATH", on_path,
+          "" if on_path else f'{bin_dir} not on PATH — run `export PATH="{bin_dir}:$PATH"` (or `uv tool update-shell`) and open a new terminal',
+          critical=False)
+
     wrapper = _wrapper_path(home)
     check("wrapper rendered", wrapper.exists(), str(wrapper))
     check("wrapper executable", wrapper.exists() and os.access(wrapper, os.X_OK),
@@ -360,6 +377,20 @@ def cmd_doctor(argv: list[str]) -> int:
     n = len(load_opt_in_paths(optin)) if optin.exists() else 0
     check("opt-in allowlist", True,
           f"{n} entries" if optin.exists() else "absent — all captures will skip",
+          critical=False)
+
+    # Vault path — surface where the local vault resolves and whether it matches the
+    # MemorySpace Desktop vault (~/Somewhere). They differ by default (#653): mi-mcp
+    # defaults to ~/MemoryIntelligence; the Desktop reads ~/Somewhere. If MI_VAULT
+    # isn't unifying them, backfilled memories won't appear in the Desktop.
+    from . import vault as _vault
+    vpath = _vault.vault_path()
+    desktop_vault = home / "Somewhere"
+    mi_vault_set = "MI_VAULT" in os.environ
+    matches = vpath.resolve() == desktop_vault.resolve()
+    check("vault path", matches or mi_vault_set,
+          str(vpath) if matches else
+          f"{vpath} — Desktop reads {desktop_vault}; set MI_VAULT={desktop_vault} so both share one vault (#653)",
           critical=False)
 
     for s, p in _surface_paths(home).items():
@@ -515,6 +546,77 @@ def _analyze_export(lines) -> BackfillStats:
     return st
 
 
+# --- pure transforms (export row → .umo inputs); unit-testable without I/O -----
+
+def _parse_export_objects(lines) -> list[dict]:
+    """Parse export NDJSON lines into UMO dicts (skip blanks/errors/malformed)."""
+    out: list[dict] = []
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(obj, dict) and not obj.get("_error"):
+            out.append(obj)
+    return out
+
+
+def _text_for_embedding(row: dict) -> str:
+    """Pick the text to (re-)embed — the normalized text, else raw, else summary.
+
+    The cloud has no exported embedding (`export.py` omits the 384-d vector), so
+    backfill must re-embed locally; this chooses the same text capture embeds.
+    """
+    for k in ("normalized_text", "raw_text", "summary"):
+        v = row.get(k)
+        if v and str(v).strip():
+            return str(v)
+    return ""
+
+
+def _payload_for_umo(row: dict, embedding: list[float]) -> dict:
+    """Build the encrypted ``.umo`` payload for a backfilled cloud UMO."""
+    return {
+        "embedding": embedding,
+        "summary": row.get("summary") or "",
+        "entities": row.get("entities") or [],
+        "topics": row.get("tags") or [],
+        "created_at": row.get("created_at"),
+        "normalized_text": row.get("normalized_text") or "",
+        "raw_text": row.get("raw_text"),
+        "semantic_hash": row.get("semantic_hash"),
+        "quality_score": row.get("quality_score"),
+        "source_type": row.get("source_type"),
+        # Provenance: owner-self-signed, NOT MI-attested (we re-produced it locally).
+        "origin": "backfill",
+    }
+
+
+def _public_metadata_for_umo(row: dict, owner_did: str) -> dict:
+    """Plaintext public metadata for a backfilled ``.umo`` (no PII; vault-readable).
+
+    Emits the same field set the desktop app writes (content_type / format_version /
+    mi_key_id / schema_version / source_count) so the two surfaces share one
+    readable home, plus an ``origin`` provenance label (the desktop ignores extras).
+    """
+    from . import umo_format
+    return {
+        "umo_id": row.get("id"),
+        "created_at": row.get("created_at"),
+        "owner_did": owner_did,
+        "content_type": "text/plain",
+        "format_version": umo_format.FORMAT_VERSION_STR,
+        "mi_key_id": "local",
+        "schema_version": row.get("schema_version") or "1.0",
+        "source_count": 1,
+        # MCP provenance: owner-self-signed backfill, NOT MI-attested (extra field).
+        "origin": "backfill",
+    }
+
+
 def cmd_backfill(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         prog="mi-mcp backfill",
@@ -559,11 +661,15 @@ def cmd_backfill(argv: list[str]) -> int:
                 resp.read()
                 print(f"error: export HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
                 return 1
-            stats = _analyze_export(resp.iter_lines())
+            # Collect the stream once; we need it for both the stats and (on
+            # --execute) the write pass. The migration is a one-shot, so holding
+            # the (embedding-free) export in memory is acceptable.
+            lines = list(resp.iter_lines())
     except httpx.HTTPError as exc:
         print(f"error: export request failed: {exc}", file=sys.stderr)
         return 1
 
+    stats = _analyze_export(lines)
     print()
     print(f"  memories            : {stats.total}")
     print(f"  approx size         : {stats.approx_bytes / 1024:.1f} KB")
@@ -578,8 +684,57 @@ def cmd_backfill(argv: list[str]) -> int:
         print(f"  .umo with your owner key → write to {vault_dir} → build the local index.")
         return 0
 
-    print("\n  NOTE: the --execute write path (re-embed → encrypt → vault.write_umo → index)")
-    print("  is the next increment and is not wired in this build. Dry-run validated the plan.")
+    # ---- EXECUTE: re-embed locally → encrypt to .umo → vault → build index ----
+    objects = _parse_export_objects(lines)
+    embeddable = [(o, t) for o in objects if (t := _text_for_embedding(o)) and o.get("id")]
+    skipped_no_text = sum(1 for o in objects if o.get("id") and not _text_for_embedding(o))
+    if not embeddable:
+        print("\n  nothing to write (no embeddable memories in the export).")
+        return 0
+
+    try:
+        from . import embedder, indexer, keys, umo_format
+        # create=False: NEVER mint a new owner key as a side effect of a migration —
+        # that would encrypt the backfill to a key the owner doesn't hold, and reads
+        # would silently skip every file (review H3). Fail loudly if it's not resolvable.
+        owner_priv = keys.load_master_private_key(create=False)
+        owner_pub = owner_priv.public_key()
+        signing = keys.load_local_signing_key(create=False)
+        # Match the desktop's fixed owner_did so MCP- and desktop-written .umo share
+        # one consistent home (owner_did is a label, not used in decryption).
+        owner_did = umo_format.LOCAL_OWNER_DID
+    except Exception as e:  # missing crypto extra / no Keychain key / etc.
+        print(f"\nerror: cannot resolve owner keys: {e}", file=sys.stderr)
+        print("  (run `mi-mcp setup`/the desktop app first so the owner key exists)", file=sys.stderr)
+        return 2
+
+    # Print the key fingerprint so you can confirm the backfill is encrypted to YOUR key.
+    print(f"\n  owner key: {keys.owner_did(owner_priv)}  (confirm this is yours)")
+    print(f"  embedding {len(embeddable)} memories locally (bge-small)…")
+    try:
+        vectors = embedder.embed([t for _, t in embeddable])
+    except embedder.LocalEmbedderError as e:
+        print(f"\nerror: {e}", file=sys.stderr)
+        return 2
+
+    written = 0
+    for (row, _text), vec in zip(embeddable, vectors):
+        pm = _public_metadata_for_umo(row, owner_did)
+        blob = umo_format.produce_umo_for_owner(
+            _payload_for_umo(row, vec), pm, owner_pub, signing
+        )
+        vault.write_umo(pm["umo_id"], owner_did, blob)
+        written += 1
+
+    print(f"  wrote {written} .umo files → {vault_dir}")
+    if skipped_no_text:
+        print(f"  skipped {skipped_no_text} memories with no embeddable text")
+
+    print("  building local index …")
+    count = indexer.rebuild_and_save(owner_priv=owner_priv)
+    print(f"  ✅ index built: {count} memories rankable locally → {paths.local_index_path()}")
+    print("\n  Local reads are wired: set MI_MCP_LOCAL=1 to serve mi_ask/mi_list from this")
+    print("  vault. `mi-mcp index build` rebuilds the index after vault changes.")
     return 0
 
 
@@ -746,6 +901,44 @@ def cmd_setup(argv: list[str]) -> int:
     return rc
 
 
+def cmd_index(argv: list[str]) -> int:
+    """Build/inspect the local vector index: ``mi-mcp index {build|path|stat}``.
+
+    ``build`` decrypts the vault with your master key (Keychain prompt) and writes
+    the rank sidecar; the server loads that prebuilt sidecar on the read path.
+    """
+    ap = argparse.ArgumentParser(prog="mi-mcp index")
+    sub = ap.add_subparsers(dest="action", required=True)
+    sub.add_parser("build", help="(re)build the index from the vault (needs your master key)")
+    sub.add_parser("path", help="print the index sidecar path")
+    sub.add_parser("stat", help="show how many memories are indexed")
+    args = ap.parse_args(argv)
+
+    from . import indexer
+
+    if args.action == "path":
+        print(paths.local_index_path())
+        return 0
+
+    if args.action == "stat":
+        idx = indexer.load_index()
+        if idx is None:
+            print(f"(no index yet — run `mi-mcp index build`)  [{paths.local_index_path()}]")
+            return 0
+        print(f"{len(idx)} memories indexed  [{paths.local_index_path()}]")
+        return 0
+
+    # build
+    try:
+        count = indexer.rebuild_and_save()
+    except Exception as e:
+        detail = str(e) or type(e).__name__
+        print(f"cannot build index: {detail}", file=sys.stderr)
+        return 1
+    print(f"✅ indexed {count} memories → {paths.local_index_path()}")
+    return 0
+
+
 _COMMANDS = {
     "setup": cmd_setup,
     "init": cmd_setup,   # alias
@@ -754,6 +947,7 @@ _COMMANDS = {
     "status": cmd_status,
     "memory": cmd_memory,
     "backfill": cmd_backfill,
+    "index": cmd_index,
 }
 
 

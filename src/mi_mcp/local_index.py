@@ -3,7 +3,7 @@
 The vault (`vault.py`) stores owner-encrypted UMOs but has no search. This adds a
 local, network-free index so `mi_ask` can rank the vault and return cited results
 without touching the API — the structural fix for the cold-start timeout, and the
-foundation of the FERPA "MI Local" school tier (no cloud, no model).
+basis for fully offline reads (no cloud, no model).
 
 DESIGN
 ------
@@ -11,21 +11,21 @@ DESIGN
   vectors, so a native HNSW / sqlite-vec dependency is not warranted yet (and it
   would complicate desktop-app notarization). The :class:`LocalIndex` interface is
   the seam to swap in an ANN backend later if a vault ever exceeds ~100k UMOs.
-- The rank mirrors the server formula (`api/public/search.py`):
-  ``semantic*0.60 + keyword*0.15 + entity*0.15 + recency*0.10`` — so local and
-  cloud ranking stay comparable.
+- The rank blends semantic, keyword, entity, and recency signals (weights in
+  ``DEFAULT_WEIGHTS``) so local and cloud results stay comparable.
 
 TRUST
 -----
 The index holds summaries (potentially PII) and embeddings derived from content, so
 it MUST live in the local trusted directory alongside the encrypted vault and
-inherit the device's at-rest protection (e.g. FileVault, per the school-tier spec).
+inherit the device's at-rest protection (e.g. FileVault).
 Encrypting the sidecar with the vault key is a flagged hardening, not yet done.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
@@ -37,7 +37,7 @@ from typing import Optional, Sequence
 # module — for its dataclasses or JSON persistence — never requires numpy. Only
 # ranking does. Keeps `pip install memoryintelligence-mcp` numpy-free.
 
-# Mirrors api/public/search.py so local and cloud ranking are comparable.
+# Local ranking weights, kept comparable to the cloud ranking.
 DEFAULT_WEIGHTS = {"semantic": 0.60, "keyword": 0.15, "entity": 0.15, "recency": 0.10}
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -62,6 +62,7 @@ class IndexEntry:
     entities: list = field(default_factory=list)
     topics: list = field(default_factory=list)
     created_at: float = 0.0  # epoch seconds
+    source: str = ""  # provenance label, carried for citation (not used in ranking)
 
 
 @dataclass
@@ -83,6 +84,14 @@ class LocalIndex:
 
     def remove(self, umo_id: str) -> None:
         self._entries.pop(umo_id, None)
+
+    def get(self, umo_id: str):
+        """Return the IndexEntry for a umo_id (or None) — for hydrating hits."""
+        return self._entries.get(umo_id)
+
+    def all(self) -> list:
+        """All entries, insertion order — for listing surfaces."""
+        return list(self._entries.values())
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -157,12 +166,25 @@ class LocalIndex:
             "weights": self._weights,
             "entries": [asdict(e) for e in self._entries.values()],
         }
-        path.write_text(json.dumps(payload))
+        # Atomic, owner-only: write a 0600 temp then os.replace — a reader never sees a
+        # torn/partial sidecar, and there is no 0644 window (the file holds PII summaries).
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(payload))
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path) -> "LocalIndex":
         data = json.loads(Path(path).read_text())
         idx = cls(weights=data.get("weights"))
+        # Forward/backward-compatible: ignore unknown keys so a sidecar written by a
+        # different IndexEntry version loads (dropping fields) instead of TypeError-ing.
+        fields = IndexEntry.__dataclass_fields__
         for raw in data.get("entries", []):
-            idx.add(IndexEntry(**raw))
+            idx.add(IndexEntry(**{k: v for k, v in raw.items() if k in fields}))
         return idx
