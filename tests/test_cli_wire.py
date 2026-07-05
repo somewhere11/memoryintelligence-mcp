@@ -73,6 +73,50 @@ def test_wrapper_self_heals_when_baked_path_is_stale(tmp_path):
     assert "mi_sk_" not in body                              # still never embeds the key
 
 
+def test_wrapper_sets_mi_vault_to_somewhere_behind_a_guard(tmp_path):
+    # #653: the wrapper must point the local .umo vault at the Desktop vault
+    # (~/Somewhere) so both surfaces resolve ONE vault — but only as a DEFAULT,
+    # behind a guard so an explicit MI_VAULT (env or config) still wins.
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    body = _wrapper(tmp_path).read_text()
+    assert 'export MI_VAULT="$HOME/Somewhere"' in body   # points at the Desktop vault
+    assert '[[ -z "${MI_VAULT:-}" ]]' in body            # only when unset — user's value wins
+    assert "mi_sk_" not in body                          # still never a key
+
+
+def test_doctor_vault_check_green_once_wired(tmp_path, capsys, monkeypatch):
+    # After wire bakes MI_VAULT=~/Somewhere into the wrapper, doctor's vault-path
+    # check must read that wired default and go green — even though MI_VAULT is not
+    # set in the shell running doctor.
+    monkeypatch.delenv("MI_VAULT", raising=False)
+    # Before wire: the default resolves to ~/MemoryIntelligence → mismatch (warns).
+    run_admin("doctor", ["--home", str(tmp_path)])
+    before = capsys.readouterr().out
+    assert "vault path" in before
+    assert "#653" in before                              # flags the mismatch pre-wire
+
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    capsys.readouterr()  # clear
+    run_admin("doctor", ["--home", str(tmp_path)])
+    after = capsys.readouterr().out
+    # Green: resolves to the Desktop vault via the wired wrapper, no #653 warning.
+    assert str(tmp_path / "Somewhere") in after
+    assert "wrapper (wired)" in after
+    assert "#653" not in after
+
+
+def test_doctor_vault_check_respects_explicit_mi_vault(tmp_path, capsys, monkeypatch):
+    # An explicit MI_VAULT the user set is their choice and must pass doctor even
+    # if it isn't ~/Somewhere (we surface the path, we don't second-guess it).
+    custom = tmp_path / "my-own-vault"
+    monkeypatch.setenv("MI_VAULT", str(custom))
+    run_admin("doctor", ["--home", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert str(custom) in out
+    assert "MI_VAULT env" in out
+    assert "#653" not in out       # user's explicit choice → no nag
+
+
 def test_capture_anywhere_sets_desktop_env_only(tmp_path):
     # --capture-anywhere opts capture in for Claude Desktop (no project cwd to
     # scope to) but must NOT touch Cursor, which opens a real folder and keeps

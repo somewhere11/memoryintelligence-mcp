@@ -30,6 +30,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -71,6 +72,16 @@ if [[ -z "${MI_API_KEY:-}" ]]; then
   exit 1
 fi
 export MI_API_KEY
+
+# Point the local .umo vault at the MemorySpace Desktop vault (~/Somewhere) so
+# both surfaces resolve ONE vault (#653). Without this, mi-mcp defaults to
+# ~/MemoryIntelligence and backfilled memories never appear in the Desktop (and
+# on a dev machine ~/MemoryIntelligence is the monorepo checkout itself). An
+# explicit MI_VAULT (inherited env or a config `env` entry) still wins — we only
+# fill the default.
+if [[ -z "${MI_VAULT:-}" ]]; then
+  export MI_VAULT="$HOME/Somewhere"
+fi
 
 # Resolve the mi-mcp binary. The path captured at `wire` time is tried first —
 # it's the most reliable under a host's minimal GUI PATH (e.g. Claude Desktop).
@@ -126,6 +137,23 @@ def _surface_key(surface: str) -> str:
 
 def _wrapper_path(home: Path) -> Path:
     return paths.wrapper_path(home=home)
+
+
+def _wrapper_vault(home: Path) -> Path | None:
+    """The ``MI_VAULT`` default baked into the rendered wrapper by ``wire``, if any.
+
+    The wrapper ``export MI_VAULT="$HOME/Somewhere"``s (behind a guard) so the
+    server resolves the same vault as the Desktop (#653). ``doctor`` reads it to
+    report the vault the *server* will actually use at launch — which isn't
+    necessarily set in the shell running ``doctor``. Returns ``None`` if the
+    wrapper is absent or sets no vault default."""
+    wrapper = _wrapper_path(home)
+    if not wrapper.exists():
+        return None
+    m = re.search(r'MI_VAULT="([^"]*)"', wrapper.read_text())
+    if not m:
+        return None
+    return Path(m.group(1).replace("$HOME", str(home))).expanduser()
 
 
 def _mi_mcp_bin() -> str:
@@ -379,19 +407,33 @@ def cmd_doctor(argv: list[str]) -> int:
           f"{n} entries" if optin.exists() else "absent — all captures will skip",
           critical=False)
 
-    # Vault path — surface where the local vault resolves and whether it matches the
-    # MemorySpace Desktop vault (~/Somewhere). They differ by default (#653): mi-mcp
-    # defaults to ~/MemoryIntelligence; the Desktop reads ~/Somewhere. If MI_VAULT
-    # isn't unifying them, backfilled memories won't appear in the Desktop.
-    from . import vault as _vault
-    vpath = _vault.vault_path()
+    # Vault path — where the local .umo vault resolves, and whether it matches the
+    # MemorySpace Desktop vault (~/Somewhere). By default they differ (#653): mi-mcp
+    # defaults to ~/MemoryIntelligence, the Desktop reads ~/Somewhere. `mi-mcp wire`
+    # bakes `MI_VAULT="$HOME/Somewhere"` into the wrapper to unify them, so the
+    # EFFECTIVE vault is the one the wrapper exports when it spawns the server — not
+    # necessarily what's set in this doctor shell. Resolve in that order: a live
+    # MI_VAULT (an explicit override always wins) → the wrapper's baked-in default →
+    # the paths default.
     desktop_vault = home / "Somewhere"
-    mi_vault_set = "MI_VAULT" in os.environ
+    live_vault = os.environ.get("MI_VAULT")
+    if live_vault:
+        vpath, vsrc = Path(live_vault).expanduser(), "MI_VAULT env"
+    elif (wired := _wrapper_vault(home)) is not None:
+        vpath, vsrc = wired, "wrapper (wired)"
+    else:
+        vpath, vsrc = paths.vault_dir(home=home), "default"
     matches = vpath.resolve() == desktop_vault.resolve()
-    check("vault path", matches or mi_vault_set,
-          str(vpath) if matches else
-          f"{vpath} — Desktop reads {desktop_vault}; set MI_VAULT={desktop_vault} so both share one vault (#653)",
-          critical=False)
+    # Green when it resolves to the Desktop vault, or when the user set an explicit
+    # MI_VAULT of their own (their choice wins — we don't second-guess it). Only the
+    # unresolved default (mismatch, no explicit override) gets the #653 nag.
+    green = matches or bool(live_vault)
+    if green:
+        detail = f"{vpath}  [{vsrc}]"
+    else:
+        detail = (f"{vpath} [{vsrc}] — Desktop reads {desktop_vault}; run `mi-mcp wire` "
+                  f"(bakes MI_VAULT={desktop_vault}) so both share one vault (#653)")
+    check("vault path", green, detail, critical=False)
 
     for s, p in _surface_paths(home).items():
         servers = _load_json(p).get(_surface_key(s), {})

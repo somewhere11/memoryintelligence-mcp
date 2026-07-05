@@ -3,6 +3,29 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] — 2026-07-05
+
+### Fixed — one shared vault with the MemorySpace Desktop (MI#653)
+`0.2.0` noted that `mi-mcp` defaulted its local `.umo` vault to `~/MemoryIntelligence`
+while the MemorySpace Desktop app reads `~/Somewhere` — two separate folders, so a
+memory captured or backfilled through `mi-mcp` never showed up in the Desktop app, and
+told you to point `MI_VAULT` there by hand. This release makes that automatic.
+
+- **`mi-mcp wire` / `setup` now point the vault at `~/Somewhere`** — they write
+  `export MI_VAULT="$HOME/Somewhere"` into the launcher (`run-mi-mcp.sh`), so `mi-mcp`
+  and the Desktop resolve **one** vault out of the box. It's a default only: it's
+  guarded so an explicit `MI_VAULT` you set yourself (env or MCP config) still wins.
+- **`paths.py`'s default is unchanged** (`~/MemoryIntelligence`) — existing installs are
+  never silently moved; the unification happens the next time you run `wire`.
+- **`mi-mcp doctor` reports the effective vault** and whether it matches the Desktop's,
+  reading the value the launcher will actually use — so the check goes green once wired.
+
+**To pick this up:** upgrade, then **re-run `mi-mcp wire`** (upgrading alone doesn't
+rewrite the launcher), and restart Claude Desktop. `mi-mcp doctor` should show the vault
+as `~/Somewhere`. Files already backfilled into `~/MemoryIntelligence` by `0.2.0` stay
+where they are — move them into `~/Somewhere` (or re-run `backfill`) if you want them in
+the app; `doctor` flags the mismatch.
+
 ## [0.2.0] — 2026-07-04
 
 ### Added — the local vault (Path A), previously built on `main` but never released

@@ -36,11 +36,14 @@ from dataclasses import dataclass
 MAGIC = b"UMO!"  # 0x554D4F21
 FORMAT_VERSION = 0x0100  # canonical FEAT-0051 v1.0
 
-# Shared cross-surface conventions (the unified local home). The Rust desktop app
-# ("Somewhere") writes these same values, so files written by the MCP and by the
-# desktop are mutually readable in one vault. owner_did is a plaintext metadata
-# label only (NOT used in decryption — that's the X25519 key), so a fixed value is
-# safe and keeps the home consistent.
+# Shared cross-surface .umo conventions. The Rust desktop app ("Somewhere") writes
+# these same values, so a file written by the MCP and one written by the desktop
+# are mutually READABLE — but only when both surfaces point at the SAME directory.
+# By default they do NOT: mi-mcp resolves ~/MemoryIntelligence while the desktop
+# reads ~/Somewhere (#653), so identical conventions in two dirs are two vaults,
+# not one. `mi-mcp wire` bakes MI_VAULT=~/Somewhere into its launcher to unify them.
+# owner_did is a plaintext metadata label only (NOT used in decryption — that's the
+# X25519 key), so a fixed value is safe and keeps the conventions consistent.
 LOCAL_OWNER_DID = "did:mi:owner-local"
 FORMAT_VERSION_STR = "0x0100"  # string form the desktop stores in public_metadata
 _HKDF_INFO = b"umo-cek-wrap-v1"
