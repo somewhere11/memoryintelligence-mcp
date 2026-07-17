@@ -28,7 +28,7 @@ MCP_ENDPOINTS = [
     ("post", "/v1/batch"),                   # mi_batch
     ("post", "/v1/upload"),                  # mi_upload
     ("post", "/v1/umo/match"),               # mi_match
-    ("get", "/v1/accounts/me"),              # mi_account
+    ("get", "/v1/account"),                  # mi_account (API-key authed; /v1/accounts/me is JWT-only)
 ]
 
 _HTTP = {"get", "post", "put", "patch", "delete"}
