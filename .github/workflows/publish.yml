@@ -1,0 +1,54 @@
+name: Publish to PyPI
+
+# Runs on the PUBLIC MIRROR only. Trusted Publishing (OIDC) — NO stored token.
+# Flow: push a vX.Y.Z tag -> build+check -> a maintainer APPROVES the protected
+# `pypi` environment -> PyPI publishes with PEP 740 attestations.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Assert git tag matches package version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${REF_NAME#v}"
+          PKG="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          echo "tag=$TAG version=$PKG"
+          test "$TAG" = "$PKG" || { echo "::error::tag ($TAG) != pyproject version ($PKG)"; exit 1; }
+      - name: Build + validate
+        run: |
+          python -m pip install build twine
+          python -m build
+          twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/memoryintelligence-mcp
+    permissions:
+      id-token: write   # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI (Trusted Publishing + attestations)
+        uses: pypa/gh-action-pypi-publish@release/v1
