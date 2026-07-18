@@ -6,14 +6,14 @@
     "url": "https://github.com/somewhere11/memoryintelligence-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.2.2",
   "websiteUrl": "https://memoryintelligence.io/docs/mcp",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "memoryintelligence-mcp",
-      "version": "0.2.0",
+      "version": "0.2.2",
       "transport": { "type": "stdio" }
     }
   ]
