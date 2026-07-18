@@ -1,4 +1,4 @@
-"""Filesystem layout for Memory Intelligence — one on-brand namespace.
+"""Filesystem layout for MemoryIntelligence — one on-brand namespace.
 
 Single visible/hidden split, no lookalike names:
 

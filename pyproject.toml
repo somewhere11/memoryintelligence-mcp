@@ -7,9 +7,9 @@ name = "memoryintelligence-mcp"
 version = "0.2.1"
 description = "MCP server for MemoryIntelligence — give Claude a memory you own, set up in one command"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 requires-python = ">=3.10"
-authors = [{ name = "Somewhere", email = "connect@somewheremedia.com" }]
+authors = [{ name = "MemoryIntelligence", email = "sdk@memoryintelligence.io" }]
 keywords = ["mcp", "model-context-protocol", "memory-intelligence", "claude", "llm", "memory", "ai"]
 classifiers = [
     "Development Status :: 4 - Beta",
