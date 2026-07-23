@@ -26,6 +26,12 @@ reported green. This release cuts current `main`, which carries:
   until the host's timeout.
 - Config backup before overwrite (P1) + startup marker line (P2) from the
   onboarding-report arc, also previously unreleased.
+- **License clarified: Apache-2.0.** Every published release (0.2.0–0.2.2) has
+  shipped under Apache-2.0; an in-repo MIT text was drift, never a decision.
+  This release restores the LICENSE file and metadata to Apache-2.0 so the
+  paperwork matches what has always been published — including its explicit
+  patent grant (LICENSE §3), which applies to this package as the licensed
+  Work. See the LICENSE for its exact scope and terms.
 
 **To pick this up:** `pip install -U memoryintelligence-mcp` (or `uv tool
 upgrade`), then **re-run `mi-mcp wire`**, then fully quit + reopen Claude

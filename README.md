@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/memoryintelligence-mcp.svg)](https://pypi.org/project/memoryintelligence-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/memoryintelligence-mcp.svg)](https://pypi.org/project/memoryintelligence-mcp/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-server-blue.svg)](https://modelcontextprotocol.io)
 
 > ## Stop paying AI to reread the same context.
@@ -197,4 +197,4 @@ Contributions welcome — [CONTRIBUTING.md](CONTRIBUTING.md).
 [What is MCP](https://modelcontextprotocol.io) ·
 [Changelog](CHANGELOG.md)
 
-MIT © Somewhere. See [LICENSE](LICENSE).
+Apache-2.0 © Somewhere Media, LLC. See [LICENSE](LICENSE).
