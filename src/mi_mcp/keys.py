@@ -1,6 +1,6 @@
 """Owner key handling for the local vault — key model **A1** (locked 2026-06-05).
 
-The owner holds an **X25519 private key**; MemoryIntelligence only ever sees the
+The owner holds an **X25519 private key**; Memory Intelligence only ever sees the
 **public key** (sent on capture). MI wraps each per-UMO content key for that
 public key, so **MI cannot decrypt the owner's ``.umo`` files**.
 

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from mi_mcp.server import _fmt_untrusted, _shape_ask, _shape_list
 
 # A realistic /v1/memories/query envelope (mirrors api/public/search.py).
@@ -139,6 +141,40 @@ def test_shapers_pass_through_unexpected_shapes_unchanged():
     assert _shape_list(err) is err
     assert _shape_ask("not a dict") == "not a dict"
     assert _shape_ask({"data": {}}) == {"data": {}}
+
+
+# --- #482: `explain` must preserve the per-signal score decomposition ---
+# The MCP shaper used to drop `scores` unconditionally, so `explain` had no
+# observable effect through the tool. It is now kept iff explain was requested.
+
+@pytest.mark.parametrize("level", ["human", "audit", "full", True])
+def test_shape_ask_preserves_scores_when_explain_requested(level):
+    shaped = _shape_ask(_ASK_ENVELOPE, explain=level)
+    assert len(shaped) == 2
+    for hit in shaped:
+        assert set(hit) == {"umo_id", "summary", "source", "score", "scores"}
+    assert shaped[0]["scores"] == {
+        "semantic": 0.91, "keyword": 0.2, "entity": 0.0, "recency": 1.0,
+    }
+
+
+@pytest.mark.parametrize("explain", ["none", "false", False, "0", "None"])
+def test_shape_ask_omits_scores_when_explain_off(explain):
+    for hit in _shape_ask(_ASK_ENVELOPE, explain=explain):
+        assert "scores" not in hit
+    # default (no explain arg) also omits
+    for hit in _shape_ask(_ASK_ENVELOPE):
+        assert "scores" not in hit
+
+
+def test_shape_ask_never_invents_scores_the_api_did_not_return():
+    """If the API omitted `scores` (e.g. explain=none upstream), the shaper must
+    not fabricate the key even when the caller passed explain."""
+    env = json.loads(json.dumps(_ASK_ENVELOPE))
+    for r in env["data"]["results"]:
+        r.pop("scores", None)
+    for hit in _shape_ask(env, explain="human"):
+        assert "scores" not in hit
 
 
 def test_untrusted_wrapper_still_wraps_the_shaped_payload():

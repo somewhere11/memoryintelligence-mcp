@@ -7,10 +7,39 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import paths
+
+
+def resolve_api_key() -> str:
+    """Resolve MI_API_KEY the same chain the launcher wrapper used to: inherited env →
+    macOS Keychain (service ``MI_API_KEY``) → keyfile (~/.memoryintelligence/.env, then
+    legacy ~/.mi-env). Resolving IN-PROCESS lets ``wire`` emit a direct ``python -m mi_mcp``
+    command (which macOS Claude Desktop's sandbox allows) instead of a shell script (which it
+    blocks) — with the key still never living in any MCP config file."""
+    key = os.environ.get("MI_API_KEY", "").strip()
+    if key:
+        return key
+    account = os.environ.get("MI_KEYCHAIN_ACCOUNT") or os.environ.get("USER") or ""
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-s", "MI_API_KEY", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass  # `security` unavailable (non-macOS) or failed — fall through to the keyfile
+    envf = paths.resolve_keyfile()
+    if envf is not None:
+        for line in envf.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("MI_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 
 @dataclass(frozen=True)
@@ -59,13 +88,13 @@ class MIConfig:
             MI_MCP_LOCAL       — "1" routes mi_ask/mi_list to the local vault index when
                                  one is built (network-free); falls back to cloud on error
         """
-        api_key = os.environ.get("MI_API_KEY", "")
+        api_key = resolve_api_key()
         if not api_key:
             raise ValueError(
                 "MI_API_KEY is required.\n"
-                "Recommended: run `mi-mcp wire` — it resolves the key from your macOS Keychain\n"
-                "at launch, so the key never lives in any config file. Or export MI_API_KEY in\n"
-                "your shell. Never paste the key into an MCP client config file.\n"
+                "Recommended: run `mi-mcp setup` — it stores the key in your macOS Keychain, which\n"
+                "the server resolves at launch, so the key never lives in any config file. Or export\n"
+                "MI_API_KEY in your shell. Never paste the key into an MCP client config file.\n"
                 "Get your key at https://memoryintelligence.io/portal"
             )
 

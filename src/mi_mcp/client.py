@@ -342,10 +342,5 @@ class MIClient:
         return resp.json()
 
     async def account_info(self) -> dict[str, Any]:
-        """GET /v1/account — API key status, owner, and plan limits.
-
-        Authenticated with the API key itself. (The older /v1/accounts/me
-        requires a portal JWT, which an MCP client never holds — it only has
-        an API key — so calling it always 401'd.)
-        """
-        return await self._request("GET", "/v1/account", idempotent=True)
+        """GET /v1/accounts/me — get current account info and key status."""
+        return await self._request("GET", "/v1/accounts/me", idempotent=True)

@@ -89,6 +89,11 @@ def main():
         stream=sys.stderr,
     )
 
+    # Startup marker (Adrian's onboarding report, P2): emit ONE line the instant we reach
+    # main(), so the host log shows the process actually started. Without it, a hang in
+    # config/import reads as a silent "connected → 60s timeout" with no failure point.
+    logger.info("mi-mcp %s starting…", __version__)
+
     # Load config from env (CLI args override env vars)
     from .config import MIConfig
 

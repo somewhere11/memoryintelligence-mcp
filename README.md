@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/memoryintelligence-mcp.svg)](https://pypi.org/project/memoryintelligence-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/memoryintelligence-mcp.svg)](https://pypi.org/project/memoryintelligence-mcp/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-server-blue.svg)](https://modelcontextprotocol.io)
 
 > ## Stop paying AI to reread the same context.
@@ -76,8 +76,10 @@ and never leaves your machine except to authenticate.
 <details>
 <summary><b>Security</b> — key handling, capture consent, PII redaction, no open port</summary>
 
-- **No key in configs.** `setup`/`wire` write `env: {}`; a launcher resolves the key
-  from the Keychain (or a `chmod 600 ~/.memoryintelligence/.env` keyfile) **at launch**.
+- **No key in configs.** The key is resolved from the Keychain (or a `chmod 600
+  ~/.memoryintelligence/.env` keyfile) **at launch** — in-process for Claude Desktop
+  (direct `python -m mi_mcp` entry; its sandbox blocks shell scripts), via the
+  launcher script for Code/Cursor.
   A leaked or committed config exposes nothing.
   > **Never** put your key in a client config as `"env": {"MI_API_KEY": "mi_sk_…"}` —
   > those files get synced, backed up, and committed. Let `setup` handle it.
@@ -107,7 +109,7 @@ Found a vulnerability? [SECURITY.md](SECURITY.md) — report privately to connec
 | `MI_API_KEY` | — | Resolved by the launcher from Keychain / keyfile — don't set inline in configs |
 | `MI_BASE_URL` | `https://api.memoryintelligence.io` | API base URL |
 | `MI_MCP_FULL` | _(off)_ | `1` exposes all 10 tools; otherwise the 3 core |
-| `MI_VAULT` | `~/MemoryIntelligence` | Local `.umo` vault location |
+| `MI_VAULT` | `~/Somewhere` (set by `wire`) | Local `.umo` vault — `wire`/`setup` point it at `~/Somewhere` so it's shared with the MemorySpace Desktop app. Unwired fallback is `~/MemoryIntelligence`; an explicit value here always wins. |
 | `MI_DEFAULT_SCOPE` · `MI_DEFAULT_RETENTION` · `MI_DEFAULT_PII_HANDLING` | `user` · `meaning_only` · `extract_and_redact` | Governance defaults |
 
 **Names you'll see** — they collapse to one long form and one short form:
@@ -124,8 +126,8 @@ Found a vulnerability? [SECURITY.md](SECURITY.md) — report privately to connec
 
 | Path | What |
 |---|---|
-| `~/MemoryIntelligence/` | your `.umo` vault (override with `MI_VAULT`) |
-| `~/.memoryintelligence/mcp/run-mi-mcp.sh` | the launcher each host spawns |
+| `~/Somewhere/` | your `.umo` vault — shared with the MemorySpace Desktop app (`wire` sets `MI_VAULT` here; override with `MI_VAULT`) |
+| `~/.memoryintelligence/mcp/run-mi-mcp.sh` | the launcher Code/Cursor spawn (Claude Desktop runs `python -m mi_mcp` directly — its sandbox blocks scripts) |
 | `~/.memoryintelligence/mcp/opt-in-paths` | per-directory capture allowlist |
 | `~/.memoryintelligence/.env` | `chmod 600` keyfile (Keychain fallback) |
 </details>
@@ -195,4 +197,4 @@ Contributions welcome — [CONTRIBUTING.md](CONTRIBUTING.md).
 [What is MCP](https://modelcontextprotocol.io) ·
 [Changelog](CHANGELOG.md)
 
-Apache-2.0 © Somewhere Media, LLC. See [LICENSE](LICENSE).
+MIT © Somewhere. See [LICENSE](LICENSE).

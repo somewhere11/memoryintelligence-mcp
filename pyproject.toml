@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memoryintelligence-mcp"
-version = "0.2.2"
+version = "0.2.3"
 description = "MCP server for MemoryIntelligence — give Claude a memory you own, set up in one command"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.10"
-authors = [{ name = "MemoryIntelligence", email = "sdk@memoryintelligence.io" }]
+authors = [{ name = "Somewhere", email = "connect@somewheremedia.com" }]
 keywords = ["mcp", "model-context-protocol", "memory-intelligence", "claude", "llm", "memory", "ai"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -70,10 +70,3 @@ include = ["src/mi_mcp", "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.m
 [tool.ruff]
 target-version = "py310"
 line-length = 100
-
-[tool.pytest.ini_options]
-# Bare `async def test_*` functions (e.g. tests/test_localreads.py) are collected
-# as asyncio tests without needing a per-test @pytest.mark.asyncio marker. Without
-# this, pytest-asyncio's default (strict) mode skips/errors them with
-# "async def functions are not natively supported". Explicit markers still work.
-asyncio_mode = "auto"

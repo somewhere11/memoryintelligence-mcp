@@ -3,16 +3,44 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
-## [0.2.2] — 2026-07-18
+## [0.2.3] — 2026-07-22
 
-### Fixed
-- `mi_account` now works. It called the JWT-only `/v1/accounts/me` and always
-  returned 401 under the API-key auth the MCP server uses; repointed to the
-  API-key endpoint `GET /v1/account`.
-- Set `asyncio_mode = auto` so the bare-`async` tests run (CI was red).
+### Fixed — Claude Desktop actually launches: the sandbox P0 finally ships (#1135)
+The Desktop direct-interpreter wire (merged 2026-07-07) never reached PyPI — the
+published 0.2.2 was built from an earlier commit under the same version number,
+so `mi-mcp wire`/`setup` on the released package kept writing a Desktop entry
+pointing at `run-mi-mcp.sh`, which Claude Desktop's macOS sandbox refuses to
+exec. Result: the server never completes the MCP handshake, Desktop kills it at
+its 60s timeout ("Server disconnected"), and no tools register — while `doctor`
+reported green. This release cuts current `main`, which carries:
 
-### Changed
-- Relicensed MIT → **Apache-2.0**.
+- **`wire` emits `{command: <python>, args: ["-m", "mi_mcp"]}` for Desktop** —
+  a real Mach-O binary the sandbox allows; the key still never touches the
+  config (resolved in-process from the Keychain, time-boxed at 5s).
+- **`doctor` now FAILS when the Desktop entry points at a shell script**, with
+  the exact remediation printed — the escalated user's hours of debugging
+  become one red line.
+- **The launcher's Keychain read is time-boxed** (perl alarm, 5s) for the
+  surfaces that keep the wrapper (Code/Cursor): a Keychain ACL authorization
+  prompt (e.g. after a venv/binary change) can no longer hang the launch
+  until the host's timeout.
+- Config backup before overwrite (P1) + startup marker line (P2) from the
+  onboarding-report arc, also previously unreleased.
+
+**To pick this up:** `pip install -U memoryintelligence-mcp` (or `uv tool
+upgrade`), then **re-run `mi-mcp wire`**, then fully quit + reopen Claude
+Desktop. `mi-mcp doctor` must show `[✓] desktop entry sandbox-launchable`.
+
+## [0.2.2] — 2026-07-07
+
+### Fixed — `explain` now surfaces the score breakdown through `mi_ask` (MI#482)
+`mi_ask`'s `explain` argument was silently dropped: the MCP output shaper projected
+every hit down to `{umo_id, summary, source, score}` and discarded the per-signal
+`scores` breakdown unconditionally, so passing `explain: "human"` (or any level) had
+no observable effect and ranking couldn't be diagnosed (e.g. the entity-channel
+contribution). The shaper now **keeps the `scores` block** (semantic/keyword/entity/
+recency) on each hit whenever `explain` is anything other than `none`; the default
+lean shape is unchanged, so token cost is unaffected unless you ask for the breakdown.
 
 ## [0.2.1] — 2026-07-05
 

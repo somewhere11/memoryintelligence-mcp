@@ -1,10 +1,12 @@
 """Tests for `mi-mcp wire/doctor/status` — all against temp HOME dirs.
 
 Critical security assertion: no API key ("mi_sk_") is ever written into any
-config file; the rendered wrapper carries the key-resolution logic instead.
+config file; Keychain resolution carries the key instead (wrapper for Code/Cursor,
+in-process for the direct-interpreter Desktop entry).
 """
 
 import json
+import sys
 from pathlib import Path
 
 import mi_mcp.cli as cli
@@ -35,12 +37,21 @@ def test_wire_creates_wrapper_and_configs_without_key(tmp_path):
     assert "exec " in body and "MI_API_KEY" in body
     assert "mi_sk_" not in body  # wrapper RESOLVES the key, never embeds it
 
-    for cfg_path in (_desktop(tmp_path), _code(tmp_path)):
-        cfg = json.loads(cfg_path.read_text())
-        entry = cfg["mcpServers"][SERVER_KEY]
-        assert entry["command"] == str(wrapper)
-        assert entry["env"] == {}          # NO inline key
-        assert "mi_sk_" not in cfg_path.read_text()
+    # Code/Cursor aren't sandboxed like Claude Desktop → keep the self-healing wrapper.
+    code_entry = json.loads(_code(tmp_path).read_text())["mcpServers"][SERVER_KEY]
+    assert code_entry["command"] == str(wrapper)
+    assert code_entry["env"] == {}          # NO inline key
+    assert "mi_sk_" not in _code(tmp_path).read_text()
+
+    # Desktop (P0): macOS Claude Desktop's sandbox blocks the shell wrapper, so wire spawns
+    # the Python interpreter directly (a real binary the sandbox allows). The key still isn't
+    # in the file (resolved from the Keychain at launch); MI_VAULT names the one vault (D7).
+    d_entry = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
+    assert d_entry["command"] == sys.executable
+    assert d_entry["args"] == ["-m", "mi_mcp"]
+    assert not str(d_entry["command"]).endswith(".sh")   # never a sandbox-blocked shell script
+    assert d_entry["env"].get("MI_VAULT", "").endswith("/Somewhere")
+    assert "mi_sk_" not in _desktop(tmp_path).read_text()
 
 
 def test_wire_vscode_uses_servers_key_and_stdio_type(tmp_path):
@@ -126,8 +137,10 @@ def test_capture_anywhere_sets_desktop_env_only(tmp_path):
     desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
     cursor = json.loads((tmp_path / ".cursor/mcp.json").read_text())["mcpServers"][SERVER_KEY]
     # desktop opted in + provenance-tagged so captures are reviewable apart from projects
-    assert desktop["env"] == {"MI_MCP_OPT_IN_ALL": "1", "MI_DEFAULT_SOURCE": "claude-desktop"}
-    assert cursor["env"] == {}                            # cursor keeps consent
+    assert desktop["env"]["MI_MCP_OPT_IN_ALL"] == "1"
+    assert desktop["env"]["MI_DEFAULT_SOURCE"] == "claude-desktop"
+    assert desktop["env"]["MI_VAULT"].endswith("/Somewhere")   # one-vault (D7) rides along
+    assert cursor["env"] == {}                            # cursor keeps consent (uses wrapper)
     assert "mi_sk_" not in _desktop(tmp_path).read_text()  # still no key
 
 
@@ -137,7 +150,7 @@ def test_capture_anywhere_preserved_on_plain_rewire(tmp_path):
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop", "--capture-anywhere"])
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])  # no flag
     desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
-    assert desktop["env"] == {"MI_MCP_OPT_IN_ALL": "1", "MI_DEFAULT_SOURCE": "claude-desktop"}  # preserved
+    assert desktop["env"].get("MI_MCP_OPT_IN_ALL") == "1"   # preserved (alongside MI_VAULT)
 
 
 def test_no_capture_anywhere_turns_it_off(tmp_path):
@@ -146,7 +159,7 @@ def test_no_capture_anywhere_turns_it_off(tmp_path):
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop", "--capture-anywhere"])
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop", "--no-capture-anywhere"])
     desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
-    assert desktop["env"] == {}   # explicitly turned back off
+    assert "MI_MCP_OPT_IN_ALL" not in desktop["env"]   # opt-in off (MI_VAULT still set)
 
 
 def test_wire_default_leaves_capture_gate_on(tmp_path):
@@ -154,7 +167,7 @@ def test_wire_default_leaves_capture_gate_on(tmp_path):
     # ownership stance. Desktop env stays empty.
     run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
     desktop = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]
-    assert desktop["env"] == {}
+    assert "MI_MCP_OPT_IN_ALL" not in desktop["env"]   # consent gate on; MI_VAULT still set
 
 
 def test_wire_writes_zero_keys_anywhere(tmp_path):
@@ -266,3 +279,53 @@ def test_wire_code_uses_claude_cli_for_real_home(tmp_path, monkeypatch):
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+# ── #1135: doctor catches the sandbox-blocked Desktop entry ──────────────────
+# Claude Desktop's macOS sandbox refuses to exec shell scripts, so a Desktop
+# entry pointing at run-mi-mcp.sh (written by wire <= published 0.2.2) starts,
+# never completes the handshake, and dies at the host's 60s timeout — while
+# doctor showed green. These pin the check that turns that into one red line.
+
+def test_doctor_fails_on_shell_script_desktop_entry(tmp_path, capsys):
+    cfg = _desktop(tmp_path)
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"mcpServers": {SERVER_KEY: {
+        "command": str(tmp_path / ".memoryintelligence/mcp/run-mi-mcp.sh"),
+        "args": [], "env": {},
+    }}}))
+    rc = run_admin("doctor", ["--home", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert "[✗] desktop entry sandbox-launchable" in out
+    # the remediation must be printed in place — the whole point of the check —
+    # and must carry the env block: a manual edit that drops MI_VAULT launches
+    # fine but reads the wrong vault, invisibly to doctor's vault check
+    assert "-m" in out and "mi_mcp" in out
+    assert "MI_VAULT" in out and "Somewhere" in out
+
+
+def test_doctor_passes_direct_python_desktop_entry(tmp_path, capsys):
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    capsys.readouterr()  # clear wire output
+    run_admin("doctor", ["--home", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "[✓] desktop entry sandbox-launchable" in out
+
+
+def test_doctor_skips_launchable_check_when_desktop_unwired(tmp_path, capsys):
+    run_admin("doctor", ["--home", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "sandbox-launchable" not in out
+
+
+def test_doctor_fails_on_empty_desktop_command(tmp_path, capsys):
+    # "" does not end with ".sh" — an absent command must not read as green.
+    cfg = _desktop(tmp_path)
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"mcpServers": {SERVER_KEY: {"args": ["-m", "mi_mcp"]}}}))
+    rc = run_admin("doctor", ["--home", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert "[✗] desktop entry sandbox-launchable" in out
+    assert "no command" in out

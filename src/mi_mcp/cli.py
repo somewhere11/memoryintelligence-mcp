@@ -59,8 +59,14 @@ WRAPPER_TEMPLATE = r"""#!/usr/bin/env bash
 set -euo pipefail
 
 # 1. inherited env  →  2. macOS Keychain  →  3. keyfile (new then legacy)  →  fail
+# The Keychain read is TIME-BOXED (perl alarm — present on stock macOS; the
+# Python side already bounds its own read at 5s): if the item's ACL no longer
+# trusts the caller (e.g. after a binary/venv change), `security` blocks on an
+# authorization dialog a headless MCP host can never answer, and an unbounded
+# read here hangs the launch until the host's 60s timeout kills it (#1135).
+# On timeout we fall through to the keyfile instead of hanging.
 if [[ -z "${MI_API_KEY:-}" ]]; then
-  MI_API_KEY="$(security find-generic-password -a "${MI_KEYCHAIN_ACCOUNT:-$USER}" -s "MI_API_KEY" -w 2>/dev/null || true)"
+  MI_API_KEY="$(perl -e 'alarm shift; exec @ARGV' 5 security find-generic-password -a "${MI_KEYCHAIN_ACCOUNT:-$USER}" -s "MI_API_KEY" -w 2>/dev/null || true)"
 fi
 for __mi_envf in "$HOME/.memoryintelligence/.env" "$HOME/.mi-env"; do
   if [[ -z "${MI_API_KEY:-}" && -f "$__mi_envf" ]]; then
@@ -302,21 +308,35 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool,
         migrated = [k for k in LEGACY_SERVER_KEYS if servers.pop(k, None) is not None]
         if migrated:
             print(f"  {s:8} migrated id {', '.join(migrated)} → {SERVER_KEY}")
-        # Build this surface's entry. env carries at most the one non-secret
-        # opt-in flag, desktop-only. capture_anywhere is tri-state: True enables,
+        # Build this surface's entry. capture_anywhere is tri-state: True enables,
         # False disables, None preserves the current setting (so a plain re-wire
         # never silently flips a capture choice the user made).
         env: dict[str, str] = {}
         if s == "desktop":
             prior = servers.get(SERVER_KEY)
             prior_env = prior.get("env") if isinstance(prior, dict) else None
+            # D7: point the local .umo vault at the MemorySpace Desktop vault (~/Somewhere) so
+            # both surfaces resolve ONE vault. The shell wrapper used to set this at launch;
+            # the direct-interpreter entry carries it here. A deliberate prior override wins.
+            prior_vault = prior_env.get("MI_VAULT") if isinstance(prior_env, dict) else None
+            env["MI_VAULT"] = prior_vault or str(home / "Somewhere")
             already_on = isinstance(prior_env, dict) and prior_env.get("MI_MCP_OPT_IN_ALL") == "1"
             enabled = already_on if capture_anywhere is None else capture_anywhere
             if enabled:
                 # Tag Desktop captures with a distinct provenance source so they're
                 # identifiable/reviewable apart from project (folder-scoped) captures.
-                env = {"MI_MCP_OPT_IN_ALL": "1", "MI_DEFAULT_SOURCE": "claude-desktop"}
-        entry = {"command": str(wrapper), "args": [], "env": env}
+                env["MI_MCP_OPT_IN_ALL"] = "1"
+                env["MI_DEFAULT_SOURCE"] = "claude-desktop"
+        # P0 FIX (Adrian's onboarding report): Claude Desktop's macOS sandbox throws
+        # "Operation not permitted" on any shell script it didn't ship — so pointing the
+        # config at run-mi-mcp.sh breaks EVERY Mac Desktop user. Spawn the Python interpreter
+        # directly (a real Mach-O binary the sandbox allows). config.resolve_api_key() finds
+        # the key in the Keychain at startup, so it still never lives in this file. Other
+        # surfaces (Code/Cursor) aren't sandboxed the same way and keep the self-healing wrapper.
+        if s == "desktop":
+            entry = {"command": sys.executable, "args": ["-m", "mi_mcp"], "env": env}
+        else:
+            entry = {"command": str(wrapper), "args": [], "env": env}
         # VS Code / Copilot require an explicit transport type on each entry;
         # Claude surfaces don't use one.
         surface_entry = {"type": "stdio", **entry} if s == "vscode" else entry
@@ -324,16 +344,23 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool,
         action = "update" if SERVER_KEY in servers else "add"
         nochange = servers.get(SERVER_KEY) == surface_entry
         servers[SERVER_KEY] = surface_entry
-        note = ("  ·  capture-anywhere ON" if env else "  ·  capture-anywhere off") if s == "desktop" else ""
+        opt_in_on = env.get("MI_MCP_OPT_IN_ALL") == "1"
+        note = ("  ·  capture-anywhere ON" if opt_in_on else "  ·  capture-anywhere off") if s == "desktop" else ""
         print(f"  {s:8} {cfg_path}  [{action}{' / no-change' if nochange else ''}]{note}")
-        if env and s == "desktop":
+        if opt_in_on and s == "desktop":
             print("           ⚠ ANY Claude Desktop chat under this macOS login can now write to your")
             print("             MI account (captures are PII-redacted + tagged source=claude-desktop).")
             print("             Don't enable on a shared login. Turn off: --no-capture-anywhere")
         if not dry_run:
+            # P1 (Adrian's report): an upgrade silently overwrote a working config. Before
+            # any changing write, snapshot the prior file so a bad wire is always recoverable.
+            if not nochange and cfg_path.exists():
+                backup = cfg_path.with_name(cfg_path.name + ".mi-bak")
+                _atomic_write(backup, cfg_path.read_text())
+                print(f"           backed up prior config → {backup.name}")
             _atomic_write(cfg_path, json.dumps(cfg, indent=2) + "\n")
 
-    print("\n  ✓ no API key written to any config — the wrapper resolves it at launch")
+    print("\n  ✓ no API key written to any config — resolved from the Keychain at launch")
 
 
 def cmd_wire(argv: list[str]) -> int:
@@ -443,6 +470,37 @@ def cmd_doctor(argv: list[str]) -> int:
         if legacy and not wired:
             detail = f"legacy id {', '.join(legacy)} present — run `mi-mcp wire` to migrate"
         check(f"{s} wired", wired, detail, critical=False)
+
+        # #1135 — the escalated-user failure this check exists to catch in ONE
+        # line: Claude Desktop's macOS sandbox refuses to exec shell scripts it
+        # didn't ship ("Operation not permitted"), so a Desktop entry pointing
+        # at run-mi-mcp.sh (written by wire <= the published 0.2.2) starts,
+        # never completes the MCP handshake, and Desktop kills it at its 60s
+        # timeout — "Server disconnected", no tools registered, doctor green.
+        # CRITICAL: a wired-but-unlaunchable Desktop is worse than unwired.
+        if s == "desktop" and wired:
+            entry = servers.get(SERVER_KEY) or {}
+            cmd = str(entry.get("command", ""))
+            # An absent/empty command is just as unlaunchable as a blocked
+            # script — "" must not slip through as green.
+            launchable = bool(cmd) and not cmd.endswith(".sh")
+            # The manual-edit remediation must carry the env block: wire sets
+            # MI_VAULT on the Desktop entry (#653 vault unification), and a
+            # hand-edit that drops it launches fine but reads the wrong vault —
+            # which THIS doctor's vault check would not catch, since that check
+            # inspects the wrapper's baked default, not the Desktop entry env.
+            check(
+                "desktop entry sandbox-launchable", launchable,
+                "" if launchable else (
+                    (f"points at {cmd} — the Desktop sandbox blocks shell scripts "
+                     if cmd else "entry has no command — the server cannot launch ")
+                    + f"(60s timeout / 'Server disconnected'). Fix: re-run `mi-mcp wire` "
+                    f"on >=0.2.3 (recommended — preserves env). Manual edit must keep "
+                    f"the env block: {{\"command\": \"{sys.executable}\", "
+                    f"\"args\": [\"-m\", \"mi_mcp\"], "
+                    f"\"env\": {{\"MI_VAULT\": \"{home / 'Somewhere'}\"}}}}"
+                ),
+            )
 
     print(f"\n  {'healthy ✓' if ok else 'issues found ✗'}")
     return 0 if ok else 1

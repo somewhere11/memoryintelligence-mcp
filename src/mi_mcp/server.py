@@ -112,25 +112,39 @@ def _error_text(e: MIAPIError) -> list[TextContent]:
 # UNCHANGED when it isn't the expected success shape, so errors/odd payloads
 # still surface.
 
-def _shape_ask(result: Any) -> Any:
-    """Project a /v1/memories/query response to ``[{umo_id, summary, source, score}]``."""
+def _shape_ask(result: Any, explain: Any = "none") -> Any:
+    """Project a /v1/memories/query response to a compact per-hit shape.
+
+    Default shape is ``{umo_id, summary, source, score}``. When the caller asked
+    for ``explain`` (any level other than "none"), each hit ALSO carries the
+    per-signal ``scores`` breakdown (semantic/keyword/entity/recency) the API
+    returns — #482: this shaper used to drop ``scores`` unconditionally, so the
+    ``explain`` argument had no observable effect through the MCP tool and
+    ranking couldn't be diagnosed (e.g. the entity-channel contribution).
+    """
     if not isinstance(result, dict):
         return result
     data = result.get("data")
     if not isinstance(data, dict) or "results" not in data:
         return result
+    want_scores = str(explain).strip().lower() not in ("", "none", "false", "0")
     shaped = []
     for r in data.get("results") or []:
         if not isinstance(r, dict):
             continue
-        shaped.append({
+        hit = {
             "umo_id":  r.get("umo_id"),
             # content_text duplicates summary; fall back to it only if summary is empty.
             "summary": r.get("summary") or r.get("content_text"),
             # #538: the API omits source when it's the default — absent means "api".
             "source":  r.get("source") or "api",
             "score":   r.get("score"),
-        })
+        }
+        # #482: preserve the score decomposition when explain was requested and
+        # the API actually returned it (it omits `scores` when explain=none).
+        if want_scores and r.get("scores") is not None:
+            hit["scores"] = r.get("scores")
+        shaped.append(hit)
     return shaped
 
 
@@ -279,8 +293,11 @@ def create_server(config: MIConfig | None = None) -> Server:
                 description=(
                     "Capture content into MemoryIntelligence. Transforms raw text into "
                     "a Unified Memory Object (UMO) — extracting entities, topics, sentiment, "
-                    "and generating embeddings. The raw content is discarded by default "
-                    "(meaning-only retention). Returns the created UMO with its ID."
+                    "and generating embeddings. Long captures are chunked into per-claim "
+                    "child UMOs that persist each claim's verbatim text; short captures "
+                    "persist their normalized text with a generated summary. The default "
+                    "meaning_only retention discards the raw pre-normalization buffer, "
+                    "not the readable content. Returns the created UMO with its ID."
                 ),
                 inputSchema={
                     "type": "object",
@@ -712,7 +729,8 @@ def create_server(config: MIConfig | None = None) -> Server:
 
                 case "mi_ask":
                     result = await _route_ask(config, client, arguments)
-                    return [TextContent(type="text", text=_fmt_untrusted(_shape_ask(result)))]
+                    return [TextContent(type="text", text=_fmt_untrusted(
+                        _shape_ask(result, explain=arguments.get("explain", "none"))))]
 
                 case "mi_list":
                     result = await _route_list(config, client, arguments)

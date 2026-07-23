@@ -82,10 +82,12 @@ def test_setup_file_store_wires_and_opts_in(tmp_path, monkeypatch, setup_env):
     assert w.exists() and (w.stat().st_mode & 0o111)
     assert KEY not in w.read_text()
 
-    # both surfaces wired with an empty env block
-    for cfg_path in (_desktop(tmp_path), _code(tmp_path)):
-        entry = json.loads(cfg_path.read_text())["mcpServers"][SERVER_KEY]
-        assert entry["env"] == {}
+    # code keeps the wrapper + empty env; desktop is the direct-interpreter entry that
+    # carries MI_VAULT (D7) — neither embeds a key.
+    assert json.loads(_code(tmp_path).read_text())["mcpServers"][SERVER_KEY]["env"] == {}
+    d_env = json.loads(_desktop(tmp_path).read_text())["mcpServers"][SERVER_KEY]["env"]
+    assert d_env.get("MI_VAULT", "").endswith("/Somewhere")
+    assert "MI_MCP_OPT_IN_ALL" not in d_env  # this test opts in a PROJECT, not desktop-wide
 
     # capture opt-in recorded for the project dir
     assert os.path.realpath(str(proj)) in _optin(tmp_path).read_text()
