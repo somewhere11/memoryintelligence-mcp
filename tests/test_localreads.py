@@ -8,6 +8,8 @@ the cloud does, so ``server._shape_ask`` / ``_shape_list`` project them unchange
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("numpy")
@@ -80,7 +82,9 @@ def test_ask_local_envelope_feeds_shape_ask(monkeypatch):
     assert env["meta"]["backend"] == "local"
     assert env["data"]["results"][0]["umo_id"] == "u-a"
 
-    shaped = _shape_ask(env)  # the server applies this before returning
+    # 0.2.4: _shape_ask returns an envelope {"results": [...], knowledge_receipt?};
+    # local reads carry no receipt, so the shape is just {"results": [...]}.
+    shaped = _shape_ask(env)["results"]  # the server applies this before returning
     assert isinstance(shaped, list)
     assert shaped[0] == {
         "umo_id": "u-a", "summary": "postgres for billing",
@@ -111,7 +115,12 @@ def test_list_local_envelope_feeds_shape_list():
 
     shaped = _shape_list(env)
     assert [it["umo_id"] for it in shaped] == ["u-a", "u-b"]  # newest (created_at) first
-    assert set(shaped[0]) == {"umo_id", "summary", "source", "topics", "created_at"}
+    # #1079: _shape_list now surfaces an `entities` tag list. The local envelope
+    # does not yet plumb entities into the item (that arrives with the #433
+    # scrubbed-entity work), so it resolves to an empty list here — present, not
+    # a false-positive extraction signal.
+    assert set(shaped[0]) == {"umo_id", "summary", "source", "topics", "entities", "created_at"}
+    assert shaped[0]["entities"] == []
     assert shaped[0]["created_at"].startswith("1970")  # epoch 200 → ISO
 
 
@@ -119,6 +128,45 @@ def test_list_local_paginates():
     _build_sidecar()
     env = localreads.list_local(limit=1, offset=1)
     assert [it["umo_id"] for it in env["data"]["items"]] == ["u-b"]
+
+
+# --- #433: the local read path scrubs EVERY agent-bound field ----------------
+# test_scrub.py proves scrub_text/scrub_topics work in isolation; these prove
+# ask_local / list_local actually route their agent-bound fields through them,
+# so a new field can't be added to a local item without redaction and leak raw
+# PII to the model (the CR1 regression this gate exists to prevent).
+
+def _build_pii_sidecar():
+    idx = LocalIndex()
+    idx.add(IndexEntry(
+        umo_id="u-pii", embedding=[1, 0, 0],
+        summary="email a.b@x.io — Maria Gonzalez approved the budget",
+        source="conversation",
+        topics=["budget", "Maria Gonzalez"],
+        entities=["Maria Gonzalez"],
+        created_at=300.0,
+    ))
+    indexer.save_index(idx)
+
+
+def test_ask_local_redacts_pii_in_the_envelope(monkeypatch):
+    _build_pii_sidecar()
+    monkeypatch.setattr("mi_mcp.embedder.embed_one", lambda q: [1, 0, 0])
+    env = localreads.ask_local("budget?", limit=10)
+    summary = env["data"]["results"][0]["summary"]
+    for raw in ("a.b@x.io", "Maria", "Gonzalez"):
+        assert raw not in summary, f"{raw!r} leaked through ask_local"
+    assert "<EMAIL>" in summary and "<ENTITY>" in summary
+
+
+def test_list_local_redacts_summary_and_topics(monkeypatch):
+    _build_pii_sidecar()
+    env = localreads.list_local(limit=10)
+    item = env["data"]["items"][0]
+    blob = json.dumps(item)  # nothing anywhere in the item may carry raw PII
+    for raw in ("a.b@x.io", "Maria", "Gonzalez"):
+        assert raw not in blob, f"{raw!r} leaked through list_local"
+    assert "Maria Gonzalez" not in item["topics"]  # #506 ungated-topics field
 
 
 # --- cache invalidation -----------------------------------------------------

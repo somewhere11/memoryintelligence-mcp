@@ -34,6 +34,18 @@ class MIAPIError(Exception):
         super().__init__(f"MI API {status_code} on {endpoint}: {detail}")
 
 
+class MIUploadTimeout(Exception):
+    """The client's read timeout fired on /v1/upload before the response arrived.
+
+    Distinct from a failure: /v1/upload runs the full extraction pipeline
+    synchronously server-side, so a slow file can commit its UMOs AFTER the
+    client gives up waiting. Writes are never auto-retried (double-write
+    doctrine), so this carries an honest, actionable message for the agent
+    rather than the empty ``str(httpx.ReadTimeout())`` that surfaced as a blank
+    "Unexpected error:" (#1166).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -99,6 +111,10 @@ class MIClient:
     # Idempotent reads get up to this many TOTAL attempts (1 initial + retries).
     _IDEMPOTENT_ATTEMPTS = 3
     _RETRY_BASE_DELAY = 0.5  # seconds; exponential: 0.5s, then 1.0s
+    # /v1/upload runs the extraction pipeline synchronously, so it needs a far
+    # longer read budget than the shared 30s default (#1166). Not infinite: past
+    # this we return an honest "still processing, check mi_list" message.
+    _UPLOAD_TIMEOUT = 120.0  # seconds
 
     async def _request(
         self,
@@ -325,14 +341,32 @@ class MIClient:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        # Build multipart — can't use self._request helper here
-        files = {"file": (path.name, open(path, "rb"))}
         data: dict[str, str] = {"scope": scope or self._config.default_scope}
         if metadata:
             import json
             data["metadata"] = json.dumps(metadata)
 
-        resp = await self._http.post("/v1/upload", files=files, data=data)
+        # Read the bytes up front so the descriptor is closed before the await.
+        # The previous `open(path, "rb")` lived in the files= dict and was never
+        # closed — a leaked file handle on every upload (#1166).
+        files = {"file": (path.name, path.read_bytes())}
+
+        # Build multipart — can't use self._request helper here, so upload gets
+        # none of _request's timeout handling. Give it an explicit, generous read
+        # budget (the pipeline is synchronous) and translate a read timeout into
+        # an HONEST message: the write may have committed after we gave up, and
+        # writes are never auto-retried (double-write doctrine, see _request).
+        try:
+            resp = await self._http.post(
+                "/v1/upload", files=files, data=data,
+                timeout=httpx.Timeout(self._UPLOAD_TIMEOUT, connect=10.0),
+            )
+        except httpx.TimeoutException as e:
+            raise MIUploadTimeout(
+                "Upload timed out waiting for the server, but the file may have "
+                "finished processing after the client gave up. Check `mi_list` "
+                "before retrying — a retry may create a duplicate."
+            ) from e
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)

@@ -92,7 +92,11 @@ _ENVELOPE_FIELDS = (
 
 
 def test_shape_ask_keeps_only_the_agent_useful_fields():
-    shaped = _shape_ask(_ASK_ENVELOPE)
+    out = _shape_ask(_ASK_ENVELOPE)
+    # 0.2.4: the ask shape is an envelope {"results": [...], knowledge_receipt?}
+    # so the per-query proof can ride along; the hits are unchanged.
+    assert isinstance(out, dict) and set(out) == {"results"}   # no receipt in this fixture
+    shaped = out["results"]
     assert isinstance(shaped, list) and len(shaped) == 2
     for hit in shaped:
         assert set(hit) == {"umo_id", "summary", "source", "score"}
@@ -100,6 +104,25 @@ def test_shape_ask_keeps_only_the_agent_useful_fields():
     assert shaped[0]["summary"] == "MI Proxy and MCP server are distinct layers."
     assert shaped[0]["source"] == "mcp"
     assert shaped[0]["score"] == 0.79
+
+
+def test_shape_ask_surfaces_the_knowledge_receipt():
+    """Rung-2 proof reaches the agent: the receipt rides the envelope, its
+    duplicate result-seals are dropped, and the question TEXT never appears
+    (only its hash)."""
+    env = json.loads(json.dumps(_ASK_ENVELOPE))
+    env["data"]["knowledge_receipt"] = {
+        "receipt_id": "01RCPT", "question_hash": "ab" * 32,
+        "corpus_root": "cd" * 32, "corpus_live_count": 7,
+        "results": [{"umo_id": "x", "semantic_hash": "y"}],  # duplicate — must be dropped
+        "versions": {"retrieval": "v1"},
+    }
+    out = _shape_ask(env)
+    assert set(out) == {"results", "knowledge_receipt"}
+    rcpt = out["knowledge_receipt"]
+    assert set(rcpt) == {"receipt_id", "question_hash", "corpus_root", "corpus_live_count", "versions"}
+    assert "results" not in rcpt          # the duplicate seals are dropped
+    assert rcpt["corpus_live_count"] == 7
 
 
 def test_shape_ask_drops_the_envelope_and_per_result_noise():
@@ -111,7 +134,7 @@ def test_shape_ask_drops_the_envelope_and_per_result_noise():
 def test_shape_ask_falls_back_to_content_text_when_summary_empty():
     env = json.loads(json.dumps(_ASK_ENVELOPE))
     env["data"]["results"][0]["summary"] = ""
-    shaped = _shape_ask(env)
+    shaped = _shape_ask(env)["results"]
     # content_text is the only place the text survives — don't lose it.
     assert shaped[0]["summary"] == "MI Proxy and MCP server are distinct layers."
 
@@ -126,12 +149,39 @@ def test_shape_ask_is_a_large_token_reduction():
 def test_shape_list_keeps_only_the_agent_useful_fields():
     shaped = _shape_list(_LIST_ENVELOPE)
     assert isinstance(shaped, list) and len(shaped) == 1
-    assert set(shaped[0]) == {"umo_id", "summary", "source", "topics", "created_at"}
+    # #1079: entities are now surfaced (as a flat tag list); everything else the
+    # compact list dropped stays dropped.
+    assert set(shaped[0]) == {"umo_id", "summary", "source", "topics", "entities", "created_at"}
     assert shaped[0]["umo_id"] == "33333333-3333-3333-3333-333333333333"
     assert shaped[0]["source"] == "mcp"
     blob = json.dumps(shaped)
-    for field in ("quality_score", "entities", "total_count", "has_more", "request_id"):
+    for field in ("quality_score", "total_count", "has_more", "request_id", "metadata"):
         assert field not in blob
+
+
+def test_shape_list_surfaces_entities_as_flat_tags():
+    # #1079: the compact list used to drop the entity array entirely, so a rich
+    # capture read back with no entities and (when tags were empty) topics: [].
+    shaped = _shape_list(_LIST_ENVELOPE)
+    assert shaped[0]["entities"] == ["Postgres"]
+    # topics still pass through unchanged.
+    assert shaped[0]["topics"] == ["billing", "database"]
+
+
+def test_shape_list_rich_entities_but_empty_topics_is_not_a_false_empty():
+    # The exact #1079 scare: portal shows entity_tags but mi_list showed nothing.
+    # A row whose tags (topics) are empty but whose entities are populated must
+    # still report those entities, not read as "no entities captured".
+    env = json.loads(json.dumps(_LIST_ENVELOPE))
+    env["data"]["items"][0]["topics"] = []
+    env["data"]["items"][0]["entities"] = [
+        {"text": "Marisol", "type": "PERSON"},
+        {"text": "tangerine ledger", "type": "ORG"},
+        {"text": "Marisol", "type": "PERSON"},  # dup — must be deduped
+    ]
+    shaped = _shape_list(env)
+    assert shaped[0]["topics"] == []
+    assert shaped[0]["entities"] == ["Marisol", "tangerine ledger"]
 
 
 def test_shapers_pass_through_unexpected_shapes_unchanged():
@@ -149,7 +199,7 @@ def test_shapers_pass_through_unexpected_shapes_unchanged():
 
 @pytest.mark.parametrize("level", ["human", "audit", "full", True])
 def test_shape_ask_preserves_scores_when_explain_requested(level):
-    shaped = _shape_ask(_ASK_ENVELOPE, explain=level)
+    shaped = _shape_ask(_ASK_ENVELOPE, explain=level)["results"]
     assert len(shaped) == 2
     for hit in shaped:
         assert set(hit) == {"umo_id", "summary", "source", "score", "scores"}
@@ -160,10 +210,10 @@ def test_shape_ask_preserves_scores_when_explain_requested(level):
 
 @pytest.mark.parametrize("explain", ["none", "false", False, "0", "None"])
 def test_shape_ask_omits_scores_when_explain_off(explain):
-    for hit in _shape_ask(_ASK_ENVELOPE, explain=explain):
+    for hit in _shape_ask(_ASK_ENVELOPE, explain=explain)["results"]:
         assert "scores" not in hit
     # default (no explain arg) also omits
-    for hit in _shape_ask(_ASK_ENVELOPE):
+    for hit in _shape_ask(_ASK_ENVELOPE)["results"]:
         assert "scores" not in hit
 
 
@@ -173,7 +223,7 @@ def test_shape_ask_never_invents_scores_the_api_did_not_return():
     env = json.loads(json.dumps(_ASK_ENVELOPE))
     for r in env["data"]["results"]:
         r.pop("scores", None)
-    for hit in _shape_ask(env, explain="human"):
+    for hit in _shape_ask(env, explain="human")["results"]:
         assert "scores" not in hit
 
 

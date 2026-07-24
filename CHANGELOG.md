@@ -3,6 +3,82 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] — 2026-07-24
+
+Proof surface + recall trust + upload honesty. No setup change (no re-`wire` —
+`pip install -U memoryintelligence-mcp` is enough); one additive output-shape
+change on `mi_ask` (it now returns an envelope — see the receipt note below).
+
+### Added — the proof surface reaches the agent (MI#1152 rung 2)
+MI just shipped query receipts — a per-`mi_ask` sealed record of *what the query
+saw* — but they never reached an agent through the MCP surface. Now they do:
+
+- **`mi_ask` returns a `knowledge_receipt`.** The ask output is now an envelope
+  `{"results": [...], "knowledge_receipt": {...}}` (was a bare list). The receipt
+  carries `receipt_id`, `question_hash` (the question is NEVER sent in the
+  clear — only its SHA-256), `corpus_root`, `corpus_live_count`, and the ranking
+  `versions`. Absent when receipts are disabled server-side (shape stays
+  `{"results": [...]}`). Its duplicate result-seals are dropped — the hits
+  already carry them.
+- **`mi_verify` is now visible by default.** The provenance-proof tool — the
+  product's core "we cite, we don't hallucinate" claim — was hidden behind
+  `MI_MCP_FULL`. It joins the default surface so an agent can prove a single
+  memory is untampered without a flag.
+- **Server `instructions` teach both.** The agent is told a receipt rides every
+  `mi_ask` (cite `receipt_id` for provenance/audit) and that `mi_verify`
+  recomputes a memory's seal on demand.
+
+Output-shape note: an `mi_ask` consumer that assumed a bare list must now read
+`.results`. The receipt is additive.
+
+### Added — injection-resistant recall framing (#1153)
+Text recalled from the memory store can contain content captured from untrusted
+sources. `mi_ask` / `mi_list` / `mi_explain` output now passes through a
+three-layer egress defense (adapted from PAM, arXiv:2605.11032v1 §2.1) so a
+payload smuggled into a memory renders as inert quoted data, never as an
+instruction:
+
+- **Structural framing** — the untrusted-data fence carries a per-response nonce,
+  and the closing marker bears that nonce, so recalled text can no longer forge
+  the end of the block to break out into instruction context.
+- **Content escaping** — line-leading (and post-sentence) role markers
+  (`System:` / `Assistant:` / …), chat-template sentinels (`<|im_start|>`,
+  `[/INST]`, `<<SYS>>`) and high-signal override phrases ("ignore previous
+  instructions", "reveal your system prompt") are visibly neutralized and broken
+  so they can neither impersonate a turn nor be matched as a special token.
+- **Quarantine** — a recalled result whose text carries an injection signature is
+  moved into a cordoned QUARANTINED section, structurally separated from trusted
+  recall. Clean recall is never cordoned, so retrieval fidelity is unchanged.
+
+A 200-attack before/after battery ships under `docs/validation/pam_comparison/`
+(0 executable vectors survive framing; 0 fence forgeries).
+
+### Fixed — `mi_upload` no longer reports a blank failure on a success (#1166)
+A slow file (the upload runs the full extraction pipeline synchronously
+server-side) could exceed the client's 30s read timeout **after** the server had
+already committed the UMOs — surfacing as `Unexpected error:` with nothing after
+it, on an upload that actually succeeded. Now:
+
+- upload gets an explicit, generous timeout instead of the shared 30s read budget;
+- a read timeout returns an honest, actionable message — the upload may have
+  completed, so check `mi_list` before retrying (writes are never auto-retried,
+  to avoid a duplicate) — instead of a raw, message-less error;
+- the unexpected-error fallback always includes the exception type, so no tool
+  can ever again return a blank `Unexpected error:`;
+- a leaked file handle on every upload is closed.
+
+### Fixed — `mi_list` no longer looks empty for memories that have entities (#1079)
+The compact list view dropped the per-row entity array and surfaced only
+`topics` (populated from row tags, often empty for captured content), so a rich
+capture read back as if nothing had been extracted. `mi_list` rows now carry a
+compact entity-tag list alongside `topics`.
+
+### Hardened — local read path redaction proven end-to-end (#433)
+Added coverage proving the on-device (`MI_MCP_LOCAL=1`) `mi_ask` / `mi_list`
+paths run every agent-bound field (summary and topics) through the egress
+scrubber, so a future field can't be added without redaction and leak raw PII to
+the model.
+
 ## [0.2.3] — 2026-07-22
 
 ### Fixed — Claude Desktop actually launches: the sandbox P0 finally ships (#1135)
