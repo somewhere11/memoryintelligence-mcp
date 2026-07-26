@@ -35,7 +35,7 @@ from mcp.types import (
 
 from . import localreads, recall_guard
 from .client import MIClient, MIAPIError, MIUploadTimeout
-from .config import MIConfig, is_cwd_opted_in
+from .config import MIConfig, capture_gate
 
 logger = logging.getLogger("mi_mcp")
 
@@ -770,24 +770,38 @@ def create_server(config: MIConfig | None = None) -> Server:
                     "umo_id": arguments.get("umo_id"),
                 }))]
 
-            # Consent gate (Story 8): write tools only fire from an opted-in cwd.
-            # Reads are never gated. Absent allowlist → all writes skipped.
-            if name in WRITE_TOOLS and not is_cwd_opted_in():
-                cwd = os.getcwd()
-                logger.info(f"[CONSENT] {name} skipped — cwd not opted in: {cwd}")
-                return [TextContent(type="text", text=_fmt({
-                    "status": "skipped",
-                    "reason": "cwd not opted in — run `mi-mcp setup` here, or add it to ~/.memoryintelligence/mcp/opt-in-paths (or set MI_MCP_OPT_IN_ALL=1)",
-                    "cwd": cwd,
-                    "tool": name,
-                }))]
+            # Consent gate (Story 8): writes require project-folder consent —
+            # EXCEPT on GUI/remote surfaces that spawn at "/" (no project cwd),
+            # where folder consent is structurally inapplicable and a surface-level
+            # consent applies instead (see config.capture_gate). Reads are never
+            # gated. `capture_source_hint` tags a connector-origin capture so those
+            # writes stay identifiable; None means "use the caller's own source".
+            capture_source_hint: str | None = None
+            if name in WRITE_TOOLS:
+                allowed, capture_source_hint = capture_gate()
+                if not allowed:
+                    cwd = os.getcwd()
+                    logger.info(f"[CONSENT] {name} skipped — cwd not opted in: {cwd}")
+                    return [TextContent(type="text", text=_fmt({
+                        "status": "skipped",
+                        "reason": (
+                            "Capture isn't enabled for this folder yet. Run "
+                            "`mi-mcp setup` in the folder you're working from to "
+                            "turn it on (or add that folder to "
+                            "~/.memoryintelligence/mcp/opt-in-paths)."
+                        ),
+                        "cwd": cwd,
+                        "tool": name,
+                    }))]
 
             match name:
                 case "mi_capture":
                     # Claim-granular by default (#446); an agent can opt out per call.
+                    # source: caller's own value wins; else the connector-origin tag
+                    # from the gate (a no-project-cwd surface), else the config default.
                     result = await client.capture(
                         content=arguments["content"],
-                        source=arguments.get("source"),
+                        source=arguments.get("source") or capture_source_hint,
                         scope=arguments.get("scope"),
                         scope_id=arguments.get("scope_id"),
                         retention_policy=arguments.get("retention_policy"),

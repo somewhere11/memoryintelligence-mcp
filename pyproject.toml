@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memoryintelligence-mcp"
-version = "0.2.4"
+version = "0.2.5"
 description = "MCP server for MemoryIntelligence — give Claude a memory you own, set up in one command"
 readme = "README.md"
 license = "Apache-2.0"
@@ -50,7 +50,12 @@ local = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "ruff>=0.4.0",
+    # Pinned, matching the monorepo (#1163): an unpinned ruff pulls the latest
+    # release, and 0.16 turned on rules (e.g. PLW1510) that flag pre-existing
+    # code the shipped `ruff check src/` never linted before — reddening the
+    # public mirror's CI on every push. Bump deliberately, in lockstep with the
+    # monorepo, never implicitly.
+    "ruff==0.15.22",
     "cryptography>=42.0,<46",
     "numpy>=1.24,<3",
     "fastembed>=0.3.0,<1.0",

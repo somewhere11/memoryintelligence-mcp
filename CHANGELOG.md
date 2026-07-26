@@ -3,6 +3,32 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.5] — 2026-07-24
+
+### Fixed — capture now works on Claude Desktop / claude.ai connector / Cowork
+Capture (`mi_capture`/`mi_upload`) was silently blocked on GUI and remote
+surfaces. The write-consent gate keys on the server's working directory, but
+those launchers spawn the server at the filesystem root (`/`) with no project
+folder — so the per-folder allowlist could never match, and running `mi-mcp
+setup` in a project folder didn't help (the server isn't running from there).
+Claude Desktop was already accommodated via a wired `MI_MCP_OPT_IN_ALL=1`, but
+the claude.ai connector is configured outside `mi-mcp wire` and so had no way to
+satisfy the gate at all.
+
+Now the gate recognizes "no project working directory" (a root cwd) as a
+**surface-level consent** case: capture is allowed and tagged with a
+`claude-connector` provenance source, so it's identifiable. This mirrors the
+existing Desktop behavior but is derived at runtime, so it covers every
+GUI/remote surface automatically. Reads were never gated. Editor surfaces
+(Code/Cursor launched inside a real folder) keep per-folder consent unchanged,
+and `MI_MCP_STRICT_CWD=1` restores strict folder gating on every surface for
+anyone who wants it. The blocked-capture message is now plain-language.
+
+### Changed — pinned the dev linter (`ruff==0.15.22`)
+`[dev]` pulled the latest ruff, whose newer rules flagged pre-existing code and
+reddened the public mirror's CI on every push. Pinned in lockstep with the
+monorepo (#1163); no runtime effect.
+
 ## [0.2.4] — 2026-07-24
 
 Proof surface + recall trust + upload honesty. No setup change (no re-`wire` —

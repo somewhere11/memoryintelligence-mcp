@@ -164,3 +164,48 @@ def is_cwd_opted_in(cwd: str | None = None, patterns: list[str] | None = None) -
             if cwd_abs == base or cwd_abs.startswith(base + os.sep):
                 return True
     return False
+
+
+def cwd_has_project_context(cwd: str | None = None) -> bool:
+    """False when the server has no project working directory.
+
+    GUI / remote launchers — Claude Desktop, the claude.ai connector, Cowork —
+    spawn the server at the filesystem ROOT (``/``). There is no project folder,
+    so the per-folder consent allowlist has no signal to act on. Editor surfaces
+    (Code / Cursor launched inside a folder) DO carry project context.
+
+    Root is detected cross-platform via ``dirname(p) == p`` (true for ``/`` and a
+    Windows drive root); realpath first so a symlinked root still resolves.
+    """
+    cwd_abs = os.path.realpath(cwd if cwd is not None else os.getcwd())
+    return os.path.dirname(cwd_abs) != cwd_abs
+
+
+def capture_gate(
+    cwd: str | None = None, patterns: list[str] | None = None
+) -> tuple[bool, str | None]:
+    """Decide whether a write (capture/upload/batch) may proceed, and tag its origin.
+
+    Returns ``(allowed, source_hint)``:
+
+    1. **Folder consent** — ``MI_MCP_OPT_IN_ALL=1`` or an opted-in cwd → allow
+       (``source_hint`` None; the caller's own source/default is used).
+    2. **Strict override** — ``MI_MCP_STRICT_CWD=1`` → never relax: a non-opted-in
+       cwd is blocked even with no project context, for users who want strict
+       folder gating on every surface.
+    3. **No project context** — a root cwd → allow with a ``claude-connector``
+       source hint. This is the surface-level consent that makes capture work on
+       GUI / remote clients where the folder model is structurally inapplicable.
+       It mirrors the Desktop ``MI_MCP_OPT_IN_ALL`` accommodation, but is derived
+       at RUNTIME so it also covers the claude.ai connector — which ``mi-mcp
+       wire`` cannot reach, so the connector could never satisfy the gate before.
+    4. **Real project folder, not opted in** → block.
+    """
+    cwd_abs = os.path.realpath(cwd if cwd is not None else os.getcwd())
+    if is_cwd_opted_in(cwd_abs, patterns):
+        return True, None
+    if os.environ.get("MI_MCP_STRICT_CWD") == "1":
+        return False, None
+    if not cwd_has_project_context(cwd_abs):
+        return True, "claude-connector"
+    return False, None
