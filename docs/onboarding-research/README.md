@@ -53,6 +53,20 @@ Portal signup is invite-only ("Coming soon — public signup opens shortly. Memo
 
 **Additional portal findings:** In-browser MI Search UI entirely undocumented; "shown once" key copy inconsistency; team-add catch-22 for invite-only product.
 
+### Stage 7: Extended Tools — `MI_MCP_FULL=1` (`reports/REPORT-7-*`)
+Live testing of all 4 extended tools after activating via host config (not `.env` — see I8).
+
+**Results:**
+
+| Tool | Status | Key Finding |
+|------|--------|-------------|
+| `mi_explain` | ✅ Working | 3 levels (human/audit/full); depth gated by capture source — file_import gets 113 SVO triples + full entity graph; claude-connector captures get `svo: null` |
+| `mi_match` | ✅ Working | Composite = semantic × entity × topic weighting; 73% semantic → 51.2% composite when entity/topic overlap = 0% |
+| `mi_batch` | ✅ Working | Large payloads (4+ long items) cause ConnectTimeout with no error; returns full UMO including pipeline lineage |
+| `mi_account` | ❌ 401 | Valid key authenticates all other 9 tools; mi_account alone fails — likely tier gate or auth scope bug (I9, HIGH) |
+
+**Key architectural insight:** Extended tools are a developer/pipeline API, not a user feature. Base 6 tools = daily use; extended 4 tools = pipeline inspection, bulk ingestion, and operational monitoring. This distinction is not articulated in the README.
+
 ---
 
 ## Raw Logs
