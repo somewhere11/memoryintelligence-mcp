@@ -11,6 +11,13 @@ Tools map 1:1 to the canonical SDK surface:
   mi_upload    → mi.upload()     — media file capture
   mi_match     → mi.match()      — compare two UMOs
   mi_account   → account info    — key status and quotas
+  mi_workspaces → workspace list  — id, name, role, member_count (routing)
+
+Server name: "mi-local" (#1320). The REMOTE MCP surface announces
+"memoryintelligence-remote"; the local stdio server used to announce plain
+"memoryintelligence", so a client hosting both could not tell them apart and
+silently resolved to the wrong one. Distinct names make the answering surface
+visible in initialize/ListTools.
 
 Resources expose UMOs as readable content:
   mi://memories         — list of all memories
@@ -40,7 +47,7 @@ from .config import MIConfig, capture_gate
 logger = logging.getLogger("mi_mcp")
 
 # v0 tool surface (resolves #256): only these tools are visible by default.
-# Set MI_MCP_FULL=1 to expose the full 10-tool surface. Narrowing the default
+# Set MI_MCP_FULL=1 to expose the full 11-tool surface. Narrowing the default
 # surface reduces agent decision-noise; the hidden tools stay callable by name.
 # mi_forget is exposed so owners can delete their own memories; it is guarded by
 # confirm=true + an ownership-checked soft-delete with a recovery grace window.
@@ -50,7 +57,13 @@ logger = logging.getLogger("mi_mcp")
 # mi_verify joins the default surface (0.2.4): the provenance-proof tool is the
 # product's core claim ("we cite, we don't hallucinate") — hiding it behind
 # MI_MCP_FULL meant the differentiator was invisible on the surface agents use.
-V0_VISIBLE_TOOLS = frozenset({"mi_capture", "mi_upload", "mi_ask", "mi_list", "mi_forget", "mi_verify"})
+# mi_workspaces joins the default surface (0.2.6, #1320): workspace routing is a
+# first-class concept (mi_capture takes scope/scope_id), and tool-surface parity
+# with the remote MCP means "does mi_workspaces exist" answers the same both ways.
+V0_VISIBLE_TOOLS = frozenset({
+    "mi_capture", "mi_upload", "mi_ask", "mi_list", "mi_forget", "mi_verify",
+    "mi_workspaces",
+})
 
 # Write tools — gated by the cwd consent allowlist (~/.memoryintelligence/mcp/opt-in-paths, Story 8).
 # Read tools are never gated; reading your own memory is always safe.
@@ -73,6 +86,8 @@ _TOOL_ANNOTATIONS = {
     "mi_upload":  ToolAnnotations(title="Upload media", readOnlyHint=False),
     "mi_match":   ToolAnnotations(title="Compare memories", readOnlyHint=True),
     "mi_account": ToolAnnotations(title="Account info", readOnlyHint=True),
+    # Matches the remote surface's annotation for the same tool (#1321).
+    "mi_workspaces": ToolAnnotations(title="List workspaces", readOnlyHint=True),
 }
 
 
@@ -333,7 +348,11 @@ def create_server(config: MIConfig | None = None) -> Server:
         config = MIConfig.from_env()
 
     client = MIClient(config)
-    server = Server("memoryintelligence", instructions=SERVER_INSTRUCTIONS)
+    # "mi-local", NOT "memoryintelligence" (#1320): the remote MCP announces
+    # "memoryintelligence-remote", and a plain "memoryintelligence" here made the
+    # two surfaces indistinguishable on any client hosting both — the local's
+    # tools silently masqueraded as the remote's during the 2026-08-02 debug.
+    server = Server("mi-local", instructions=SERVER_INSTRUCTIONS)
 
     if os.environ.get("MI_MCP_OPT_IN_ALL") == "1":
         logger.warning(
@@ -718,15 +737,30 @@ def create_server(config: MIConfig | None = None) -> Server:
                     "properties": {},
                 },
             ),
+            Tool(
+                # Mirrors the remote MCP surface's tool of the same name (#1320):
+                # both surfaces answer "what workspaces do I have" identically.
+                name="mi_workspaces",
+                description=(
+                    "List the workspaces you can capture into — id, name, your "
+                    "role, member count. Use a workspace's id as mi_capture's scope_id "
+                    "(with scope) to route a memory there. The first entry is your "
+                    "default (home) workspace."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
         ]
         for _t in all_tools:
             _t.annotations = _TOOL_ANNOTATIONS.get(_t.name)
         if config.full_tools:
             return all_tools
         # v0 default: only the core tools (V0_VISIBLE_TOOLS — capture, upload, ask,
-        # list, forget) are visible (resolves #256). MI_MCP_FULL=1 exposes all 10.
-        # Hidden tools remain callable by name — decision-noise narrowing, not an
-        # auth gate.
+        # list, forget, verify, workspaces) are visible (resolves #256).
+        # MI_MCP_FULL=1 exposes all 11. Hidden tools remain callable by name —
+        # decision-noise narrowing, not an auth gate.
         return [t for t in all_tools if t.name in V0_VISIBLE_TOOLS]
 
     # =========================================================================
@@ -871,6 +905,10 @@ def create_server(config: MIConfig | None = None) -> Server:
 
                 case "mi_account":
                     result = await client.account_info()
+                    return [TextContent(type="text", text=_fmt(result))]
+
+                case "mi_workspaces":
+                    result = await client.workspaces()
                     return [TextContent(type="text", text=_fmt(result))]
 
                 case _:

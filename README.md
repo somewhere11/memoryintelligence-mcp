@@ -47,7 +47,8 @@ And four things that make it more than a notepad:
 - **Owned** — memories are portable structured objects in *your* account, not locked in a model.
 - **Private** — capture is opt-in per project; PII is redacted from what the agent sees.
 
-> Set `MI_MCP_FULL=1` for the full surface (`mi_upload`, `mi_verify`, `mi_forget`,
+> The default surface is 7 tools (also `mi_upload`, `mi_verify`, `mi_forget`,
+> `mi_workspaces`). Set `MI_MCP_FULL=1` for the full 11-tool surface (adds
 > `mi_batch`, `mi_explain`, `mi_match`, `mi_account`). Tools outside the active
 > surface are rejected at the call boundary, not just hidden.
 
@@ -93,7 +94,7 @@ and never leaves your machine except to authenticate.
   redacts PII from what the agent sees (your own portal shows it raw).
 - **stdio only — no open port.** Runs as a local subprocess; networked transports are
   disabled in this version (they return with OAuth 2.1 + TLS later).
-- **Off switch.** Clear `opt-in-paths`, or remove the `memoryintelligence` entry from
+- **Off switch.** Clear `opt-in-paths`, or remove the `mi-local` entry from
   your config to fully unwire.
 
 Found a vulnerability? [SECURITY.md](SECURITY.md) — report privately to connect@somewheremedia.com.
@@ -108,7 +109,7 @@ Found a vulnerability? [SECURITY.md](SECURITY.md) — report privately to connec
 |----------|---------|-------------|
 | `MI_API_KEY` | — | Resolved by the launcher from Keychain / keyfile — don't set inline in configs |
 | `MI_BASE_URL` | `https://api.memoryintelligence.io` | API base URL |
-| `MI_MCP_FULL` | _(off)_ | `1` exposes all 10 tools; otherwise the 3 core |
+| `MI_MCP_FULL` | _(off)_ | `1` exposes all 11 tools; otherwise the 7-tool default surface |
 | `MI_VAULT` | `~/Somewhere` (set by `wire`) | Local `.umo` vault — `wire`/`setup` point it at `~/Somewhere` so it's shared with the MemorySpace Desktop app. Unwired fallback is `~/MemoryIntelligence`; an explicit value here always wins. |
 | `MI_DEFAULT_SCOPE` · `MI_DEFAULT_RETENTION` · `MI_DEFAULT_PII_HANDLING` | `user` · `meaning_only` · `extract_and_redact` | Governance defaults |
 
@@ -119,7 +120,7 @@ Found a vulnerability? [SECURITY.md](SECURITY.md) — report privately to connec
 | `MemoryIntelligence` | the brand |
 | `memoryintelligence-mcp` | the PyPI package (`pip install`) |
 | `mi-mcp` | the command you run (`mi-mcp setup`) |
-| `memoryintelligence` | the server id in your MCP config |
+| `mi-local` | the server id in your MCP config — distinct from the REMOTE MCP surface, which announces `memoryintelligence-remote` (#1320). `memoryintelligence` (≤0.2.5) is legacy; `mi-mcp wire` renames it |
 | `MI_*` | env vars / Keychain service |
 
 **On disk** — one namespace:
@@ -160,6 +161,11 @@ mi-mcp doctor           # checks binary, PATH, key, wiring, opt-in, vault path
 mi-mcp status           # wired surfaces + opt-in allowlist
 mi-mcp wire --dry-run   # preview wiring changes
 ```
+
+**Which server am I talking to?** The local server announces `mi-local`; the
+remote MCP surface announces `memoryintelligence-remote`. The local default
+surface is 7 tools; the remote is 4 — if the tool list doesn't match what you
+expect, the client resolved the other surface (#1320).
 </details>
 
 <details>
@@ -170,7 +176,7 @@ VS Code / Copilot read a different config than Claude: servers live under `"serv
 it, or add per-workspace `.vscode/mcp.json`:
 
 ```json
-{ "servers": { "memoryintelligence": { "type": "stdio", "command": "mi-mcp" } } }
+{ "servers": { "mi-local": { "type": "stdio", "command": "mi-mcp" } } }
 ```
 
 Then open Copilot Chat in **Agent** mode — the memory tools only appear there.

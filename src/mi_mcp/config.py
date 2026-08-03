@@ -63,7 +63,7 @@ class MIConfig:
     host: str = "127.0.0.1"  # loopback only; network transports are not part of v0
     port: int = 8100
 
-    # Tool surface — v0 exposes 3 tools by default; MI_MCP_FULL=1 exposes all 10 (#256).
+    # Tool surface — v0 exposes 7 tools by default; MI_MCP_FULL=1 exposes all 11 (#256, #1320).
     full_tools: bool = False
 
     # Local reads (#432 Phase 1): when True AND a built index sidecar exists, route
@@ -84,7 +84,7 @@ class MIConfig:
             MI_TRANSPORT       — stdio | sse | streamable-http (default: stdio)
             MI_HOST            — bind host for SSE/HTTP (default: 127.0.0.1, loopback only)
             MI_PORT            — bind port for SSE/HTTP (default: 8100)
-            MI_MCP_FULL        — "1" exposes all 10 tools; otherwise only the core set (#256)
+            MI_MCP_FULL        — "1" exposes all 11 tools; otherwise only the core set (#256)
             MI_MCP_LOCAL       — "1" routes mi_ask/mi_list to the local vault index when
                                  one is built (network-free); falls back to cloud on error
         """

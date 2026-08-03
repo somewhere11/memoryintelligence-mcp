@@ -41,11 +41,39 @@ from pathlib import Path
 from . import __version__, paths
 from .config import load_opt_in_paths
 
-SERVER_KEY = "memoryintelligence"
-# Pre-0.1.8 server ids we replace on wire so an upgrade leaves no orphaned entry.
-# (0.1.7 and earlier registered the server as "memory-intelligence" — the one
-# dash-seam that didn't match the brand/package "memoryintelligence".)
-LEGACY_SERVER_KEYS = ("memory-intelligence",)
+# "mi-local" (#1320): the local stdio server's config id. It was
+# "memoryintelligence" through 0.2.5, which collided with the REMOTE MCP surface
+# (announced "memoryintelligence-remote" but added to claude.ai/Desktop under the
+# display name "memoryintelligence") — on a client hosting both, the two were
+# indistinguishable and tool calls silently resolved to the wrong surface.
+SERVER_KEY = "mi-local"
+# Older server ids we migrate on wire so an upgrade leaves no orphaned entry:
+#   "memoryintelligence"  — 0.1.8 … 0.2.5 (renamed to "mi-local" in 0.2.6, #1320)
+#   "memory-intelligence" — 0.1.7 and earlier
+# Migration is GUARDED: an entry under a legacy id is only removed/renamed when it
+# actually points at the mi-mcp launcher (see _is_mi_launcher_entry) — an entry a
+# user pointed elsewhere (e.g. a remote connector they named "memoryintelligence")
+# is never touched.
+LEGACY_SERVER_KEYS = ("memoryintelligence", "memory-intelligence")
+
+
+def _is_mi_launcher_entry(entry: object) -> bool:
+    """True when a client-config server entry points at OUR launcher.
+
+    Recognizes every shape mi-mcp has ever written: the run-mi-mcp.sh wrapper
+    (Code/Cursor/VS Code), the sandbox-safe ``python -m mi_mcp`` Desktop entry,
+    and a bare ``mi-mcp`` binary path. Anything else is not ours to migrate.
+    """
+    if not isinstance(entry, dict):
+        return False
+    blob = " ".join(
+        [str(entry.get("command", "")), *(str(a) for a in (entry.get("args") or []))]
+    )
+    return (
+        "run-mi-mcp" in blob
+        or "mi_mcp" in blob
+        or blob.rstrip().endswith("mi-mcp")
+    )
 
 # Wrapper rendered by `wire`. __MI_MCP_BIN__ is replaced with the absolute path
 # to the mi-mcp binary (resolved at wire time) so the host can spawn it even
@@ -187,9 +215,18 @@ def _wire_code_via_cli(home: Path, wrapper: Path, dry_run: bool) -> bool:
         print(f"           would run: {' '.join(add_cmd)}")
         return True
     # idempotent + migrate: drop any existing entry — current id AND the legacy
-    # pre-0.1.8 ids — before re-adding, so an upgrade leaves no orphan.
-    for key in (SERVER_KEY, *LEGACY_SERVER_KEYS):
-        subprocess.run([claude, "mcp", "remove", key], capture_output=True, text=True)
+    # ids — before re-adding, so an upgrade leaves no orphan. Legacy ids are only
+    # removed when `claude mcp get` shows they point at OUR launcher (#1320): a
+    # server the user registered under "memoryintelligence" that isn't mi-mcp
+    # (e.g. the remote connector) must not be deleted out from under them.
+    subprocess.run([claude, "mcp", "remove", SERVER_KEY], capture_output=True, text=True)
+    for key in LEGACY_SERVER_KEYS:
+        g = subprocess.run([claude, "mcp", "get", key], capture_output=True, text=True)
+        blob = (g.stdout or "") + (g.stderr or "")
+        # "mi-mcp" also matches the wrapper's "run-mi-mcp.sh".
+        if g.returncode == 0 and ("mi-mcp" in blob or "mi_mcp" in blob):
+            subprocess.run([claude, "mcp", "remove", key], capture_output=True, text=True)
+            print(f"           migrated legacy id {key} → {SERVER_KEY}")
     r = subprocess.run(add_cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(f"           ! claude mcp add failed ({r.stderr.strip()[:160]}); falling back to file")
@@ -303,17 +340,39 @@ def do_wire(home: Path, surfaces: list[str], dry_run: bool,
         cfg_key = _surface_key(s)
         cfg = _load_json(cfg_path)
         servers = cfg.setdefault(cfg_key, {})
-        # Migrate: drop any pre-0.1.8 id (e.g. "memory-intelligence") so the
-        # rename to "memoryintelligence" doesn't leave a duplicate/orphan entry.
-        migrated = [k for k in LEGACY_SERVER_KEYS if servers.pop(k, None) is not None]
+        # Migrate: drop any legacy id ("memoryintelligence" ≤0.2.5, or the
+        # pre-0.1.8 "memory-intelligence") so the rename to "mi-local" (#1320)
+        # doesn't leave a duplicate/orphan entry. GUARDED: only entries that
+        # point at the mi-mcp launcher are ours to migrate — a legacy-named
+        # entry the user pointed elsewhere is left exactly as it is.
+        migrated, foreign = [], []
+        # Keep the first migrated entry's contents: a ≤0.2.5 user's overrides
+        # (MI_VAULT, MI_MCP_OPT_IN_ALL) live under the LEGACY key, and the
+        # desktop branch below reads `prior` to preserve exactly those. Popping
+        # without remembering silently reset them on upgrade (Copilot, #1326).
+        legacy_prior = None
+        for k in LEGACY_SERVER_KEYS:
+            if k not in servers:
+                continue
+            if _is_mi_launcher_entry(servers[k]):
+                popped = servers.pop(k)
+                if legacy_prior is None:
+                    legacy_prior = popped
+                migrated.append(k)
+            else:
+                foreign.append(k)
         if migrated:
             print(f"  {s:8} migrated id {', '.join(migrated)} → {SERVER_KEY}")
+        if foreign:
+            print(f"  {s:8} left {', '.join(foreign)} untouched — not an mi-mcp launcher entry")
         # Build this surface's entry. capture_anywhere is tri-state: True enables,
         # False disables, None preserves the current setting (so a plain re-wire
         # never silently flips a capture choice the user made).
         env: dict[str, str] = {}
         if s == "desktop":
-            prior = servers.get(SERVER_KEY)
+            # A mi-local entry wins; else the legacy entry we just migrated —
+            # so a ≤0.2.5 upgrade carries its env forward instead of resetting it.
+            prior = servers.get(SERVER_KEY) or legacy_prior
             prior_env = prior.get("env") if isinstance(prior, dict) else None
             # D7: point the local .umo vault at the MemorySpace Desktop vault (~/Somewhere) so
             # both surfaces resolve ONE vault. The shell wrapper used to set this at launch;
@@ -465,10 +524,20 @@ def cmd_doctor(argv: list[str]) -> int:
     for s, p in _surface_paths(home).items():
         servers = _load_json(p).get(_surface_key(s), {})
         wired = SERVER_KEY in servers
-        legacy = [k for k in LEGACY_SERVER_KEYS if k in servers]
+        # #1320 migration detection: a legacy id ("memoryintelligence" ≤0.2.5,
+        # "memory-intelligence" ≤0.1.7) counts only when its entry actually points
+        # at the mi-mcp launcher — an identically-named entry the user pointed at
+        # something else (e.g. the remote connector) is not ours and is ignored.
+        legacy = [
+            k for k in LEGACY_SERVER_KEYS
+            if k in servers and _is_mi_launcher_entry(servers[k])
+        ]
         detail = str(p) if wired else "(not wired)"
         if legacy and not wired:
-            detail = f"legacy id {', '.join(legacy)} present — run `mi-mcp wire` to migrate"
+            detail = (f"legacy id {', '.join(legacy)} points at the mi-mcp launcher — "
+                      f"run `mi-mcp wire` to rename it to {SERVER_KEY} (#1320)")
+        elif legacy:
+            detail += f"  (stale legacy id {', '.join(legacy)} also present — `mi-mcp wire` cleans it up)"
         check(f"{s} wired", wired, detail, critical=False)
 
         # #1135 — the escalated-user failure this check exists to catch in ONE

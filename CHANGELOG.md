@@ -3,6 +3,38 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.6] — 2026-08-03
+
+### Changed — the local server is now named `mi-local` (#1320)
+The local stdio server announced itself as `Server("memoryintelligence")` and
+`mi-mcp setup`/`wire` registered it under the config key `memoryintelligence` —
+while the REMOTE MCP surface (`api.memoryintelligence.io/v1/mcp`) announces
+`memoryintelligence-remote` but is typically added to claude.ai/Desktop under
+the display name "memoryintelligence". On any client hosting both, the two
+surfaces were indistinguishable and tool calls silently resolved to the wrong
+one: during a 2026-08-02 debug, the local server's tools masqueraded as the
+remote's, and `mi_workspaces` "didn't exist" because the remote was never
+called. The local server now announces `mi-local` and wires under that key.
+
+**Migration is automatic and guarded**: re-running `mi-mcp setup` or
+`mi-mcp wire` renames an existing `memoryintelligence` (or pre-0.1.8
+`memory-intelligence`) config entry to `mi-local` — but ONLY when that entry
+points at the mi-mcp launcher (`run-mi-mcp.sh`, `python -m mi_mcp`, or the
+`mi-mcp` binary). An identically-named entry pointing anywhere else is left
+untouched. `mi-mcp doctor` detects a pending rename and tells you to run
+`mi-mcp wire`. Idempotent — re-running is always safe.
+
+Which server am I talking to? The local announces `mi-local` (7 tools by
+default, 11 with `MI_MCP_FULL=1`); the remote announces
+`memoryintelligence-remote` (4 tools).
+
+### Added — `mi_workspaces` (tool-surface parity with the remote, #1320)
+The remote surface added `mi_workspaces` for workspace routing; the local
+package now has it too, in the default surface: lists the workspaces you can
+capture into (id, name, your role, member count) via `GET /v1/workspaces` —
+the same endpoint the remote calls, so "does mi_workspaces exist" answers the
+same on both surfaces. Default surface is now 7 tools; the full surface is 11.
+
 ## [0.2.5] — 2026-07-24
 
 ### Fixed — capture now works on Claude Desktop / claude.ai connector / Cowork

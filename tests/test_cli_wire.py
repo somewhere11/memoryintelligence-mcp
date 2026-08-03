@@ -207,7 +207,7 @@ def test_wire_preserves_other_servers(tmp_path):
 
 def test_wire_migrates_legacy_server_id(tmp_path):
     # A pre-0.1.8 config registered under the old id "memory-intelligence" is
-    # replaced by the new "memoryintelligence" id on wire — no orphan/duplicate.
+    # replaced by the current "mi-local" id on wire — no orphan/duplicate.
     cfg_path = _desktop(tmp_path)
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg_path.write_text(json.dumps({"mcpServers": {
@@ -219,6 +219,50 @@ def test_wire_migrates_legacy_server_id(tmp_path):
     assert "memory-intelligence" not in servers                # legacy id removed
     assert SERVER_KEY in servers                                # new id added
     assert servers["other"] == {"command": "/usr/bin/other"}   # unrelated untouched
+
+
+def test_wire_migrates_memoryintelligence_id_to_mi_local(tmp_path):
+    # #1320: a ≤0.2.5 config registered under "memoryintelligence" (the id that
+    # collided with the remote MCP surface) is renamed to "mi-local" on wire —
+    # both the wrapper shape (Code/Cursor) and the python -m shape (Desktop).
+    cfg_path = _desktop(tmp_path)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"mcpServers": {
+        "memoryintelligence": {"command": sys.executable, "args": ["-m", "mi_mcp"], "env": {}},
+    }}))
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    servers = json.loads(cfg_path.read_text())["mcpServers"]
+    assert "memoryintelligence" not in servers   # legacy id renamed away
+    assert SERVER_KEY in servers                 # now wired as mi-local
+
+
+def test_wire_leaves_foreign_memoryintelligence_entry_alone(tmp_path):
+    # #1320 guard: a "memoryintelligence" entry the USER pointed at something
+    # that is not the mi-mcp launcher (e.g. another server they named that way)
+    # is NOT ours — wire must add mi-local alongside it, never delete it.
+    cfg_path = _desktop(tmp_path)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    foreign = {"command": "/usr/local/bin/some-other-server", "args": ["--serve"]}
+    cfg_path.write_text(json.dumps({"mcpServers": {"memoryintelligence": foreign}}))
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    servers = json.loads(cfg_path.read_text())["mcpServers"]
+    assert servers["memoryintelligence"] == foreign   # untouched
+    assert SERVER_KEY in servers                      # ours added under mi-local
+
+
+def test_wire_is_idempotent_after_migration(tmp_path):
+    # Re-running wire after the #1320 migration changes nothing further.
+    cfg_path = _desktop(tmp_path)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps({"mcpServers": {
+        "memoryintelligence": {"command": "/old/run-mi-mcp.sh", "args": [], "env": {}},
+    }}))
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    first = cfg_path.read_text()
+    run_admin("wire", ["--home", str(tmp_path), "--surfaces", "desktop"])
+    assert cfg_path.read_text() == first
+    servers = json.loads(first)["mcpServers"]
+    assert list(k for k in servers if "memory" in k or k == SERVER_KEY) == [SERVER_KEY]
 
 
 def test_status_reflects_wire(tmp_path, capsys):

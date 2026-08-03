@@ -35,7 +35,7 @@ def _capturing_client():
     async def fake_request(method, path, *, json=None, params=None, **kw):
         captured["method"] = method
         captured["path"] = path
-        captured["json"] = json or {}
+        captured["json"] = json  # no coercion — None must stay distinguishable from {}
         captured["params"] = params or {}
         return {"status": "success", "data": {"results": []}}
 
@@ -118,3 +118,19 @@ async def test_list_scope_is_api_valid(scope):
     client, cap = _capturing_client()
     await client.list_memories(scope=scope)
     assert cap["params"]["scope"] in VALID_SCOPE
+
+
+# --- workspaces (#1320): a bare GET with no params, same endpoint as the remote ---
+
+@pytest.mark.asyncio
+async def test_workspaces_request_shape():
+    """mi_workspaces takes no input — the client must send a plain
+    GET /v1/workspaces with no body and no params (the API derives the caller
+    from the key). Pins the path the remote MCP surface also calls, so both
+    surfaces stay answer-identical."""
+    client, cap = _capturing_client()
+    await client.workspaces()
+    assert cap["method"] == "GET"
+    assert cap["path"] == "/v1/workspaces"
+    assert cap["json"] is None   # genuinely NO body (helper no longer coerces None → {})
+    assert cap["params"] == {}

@@ -378,3 +378,13 @@ class MIClient:
     async def account_info(self) -> dict[str, Any]:
         """GET /v1/accounts/me — get current account info and key status."""
         return await self._request("GET", "/v1/accounts/me", idempotent=True)
+
+    async def workspaces(self) -> dict[str, Any]:
+        """GET /v1/workspaces — list the caller's workspaces (mi_workspaces, #1320).
+
+        Returns ``{"workspaces": [...], "count": N}`` where each entry carries
+        id, name, the caller's role, and member_count — the routing directory
+        for workspace-targeted captures. Same endpoint the remote MCP surface's
+        mi_workspaces calls, so both surfaces answer identically.
+        """
+        return await self._request("GET", "/v1/workspaces", idempotent=True)
