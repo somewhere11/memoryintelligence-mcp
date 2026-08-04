@@ -3,6 +3,68 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.7] — 2026-08-03
+
+### Added — `mi_ask` / `mi_list` take a `workspace_id` (#385 UC2)
+Symmetric with `mi_capture` (one mental model: *omit = personal, pass an id = that
+workspace*). Omit it and the read is personal, byte-for-byte as before — no wrapper,
+no extra key, no extra round-trip. Pass a workspace you belong to and the read is
+scoped to it; a workspace you do **not** belong to is refused rather than silently
+downgraded to personal, so the scope a result reports is never a lie.
+
+Two things specific to this surface:
+
+- **A workspace read never comes from the on-device index.** `MI_MCP_LOCAL=1`
+  serves reads locally, and the local index has no workspace concept — answering
+  from it would return personal memories under a workspace label. A workspace
+  target forces the cloud path, the same way advanced filters already do.
+- **The result says whether other members' memories are actually included.**
+  Server-side workspace read-isolation (`MI_WORKSPACE_READ_ISOLATION`) is **off by
+  default**, and with it off a member-targeted read returns exactly what a personal
+  read returns. The scope block therefore carries `member_wide_reads`
+  (`true` / `false` / `"unknown"`), read from the server's own `/health`
+  capabilities and cached per process. When it is not `true` on a multi-member
+  workspace the block also carries a `note` telling the agent not to claim it
+  searched the whole team. **Without this, `shared: true, member_count: 4` on an
+  owner-scoped read is an overclaim waiting to be repeated to a user.**
+
+Requires an API server new enough to advertise
+`capabilities.workspace_read_isolation` in `/health`; older servers report
+`"unknown"` rather than a guess. The remote MCP surface reports the same field
+(read directly from the flag, since it runs inside the API process), so both
+surfaces describe a workspace read the same way.
+
+### Added — `mi_capture(workspace_id=…)` — workspace routing actually works (#385 UC1)
+Routing a capture to a specific workspace was **documented as shipped and was not
+implemented on this surface**. The backend has honored it since #736/#385 and the
+REMOTE MCP sends it — but the local package had no way to *express* a target:
+`mi_capture` had no `workspace_id` argument and `MIClient.capture()` sent no
+routing header. `mi_workspaces` (added in 0.2.6) listed workspaces the tools then
+could not capture into, and its description told agents to pass the workspace ULID
+as `scope_id`, which routes nothing (`scope`/`scope_id` is the separate governance-scope
+axis, sent in the request body). Now:
+
+- **`mi_capture(content, workspace_id?, confirm?)`** routes the capture. Omit
+  `workspace_id` and the capture goes to your home workspace exactly as before —
+  personal is still the default, and an untargeted capture costs no extra API call.
+- **A shared-workspace write is gated.** Targeting a workspace with more than one
+  member without `confirm=true` returns `{"status": "confirm_required", …}` and
+  **saves nothing** — a single silent call can never post a memory into a team
+  space. Solo and personal captures need no confirm.
+- **Every routed capture names where it landed** — the response carries
+  `destination: {workspace_id, name, role, shared, member_count}`.
+- **A workspace you are not a member of is refused, not silently downgraded** to
+  personal, so a reported destination is never a lie. Authorization itself stays
+  server-side; this mirrors it so the feedback is accurate.
+
+This matches the remote surface's contract (`mi_capture` there already took
+`workspace_id` + `confirm`), so both MCP surfaces now route captures identically.
+
+Note on the wire: the target is sent as a **header**, and the API has two names for
+it depending on the auth plane — `X-MI-Workspace` (API-key plane, which this package
+uses) and `X-Workspace-Id` (JWT plane, what the remote sends). The client sends both,
+so routing is correct on either plane.
+
 ## [0.2.6] — 2026-08-03
 
 ### Changed — the local server is now named `mi-local` (#1320)

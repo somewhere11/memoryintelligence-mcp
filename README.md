@@ -52,6 +52,32 @@ And four things that make it more than a notepad:
 > `mi_batch`, `mi_explain`, `mi_match`, `mi_account`). Tools outside the active
 > surface are rejected at the call boundary, not just hidden.
 
+### Capturing into a shared workspace
+
+By default every capture is **personal** — it lands in your home workspace and
+nobody else sees it. To put one in a team space, name it:
+
+> *"List my workspaces."* → `mi_workspaces`
+> *"Save that to Somewhere Inc."* → `mi_capture(workspace_id=…)`
+
+Two rules keep a shared space from filling up by accident:
+
+- **A workspace with more than one member needs an explicit confirm.** The first
+  call returns a preview — *"this posts to Somewhere Inc, visible to 4 members"* —
+  and **saves nothing**. Only after you say yes does the agent re-call with
+  `confirm=true`. A fresh chat can't inherit that approval.
+- **Every capture tells you where it went**, and a workspace you don't belong to is
+  refused rather than quietly saved somewhere else.
+
+Reading works the same way — `mi_ask` and `mi_list` take the same `workspace_id`:
+
+> *"What did the team decide about billing?"* → `mi_ask(workspace_id=…)`
+
+Omit it and you search your own memories. One caveat worth knowing: whether a
+workspace read returns *other members'* memories is a server-side setting that is
+**off by default**. The result's `scope` block reports `member_wide_reads` so the
+assistant can tell you what it actually searched instead of assuming.
+
 ## How it works
 
 ```

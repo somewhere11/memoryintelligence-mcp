@@ -32,11 +32,12 @@ def _capturing_client():
     client = MIClient(MIConfig(api_key="test-key"))
     captured: dict = {}
 
-    async def fake_request(method, path, *, json=None, params=None, **kw):
+    async def fake_request(method, path, *, json=None, params=None, headers=None, **kw):
         captured["method"] = method
         captured["path"] = path
         captured["json"] = json  # no coercion — None must stay distinguishable from {}
         captured["params"] = params or {}
+        captured["headers"] = headers  # None must stay distinguishable from {}
         return {"status": "success", "data": {"results": []}}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -134,3 +135,98 @@ async def test_workspaces_request_shape():
     assert cap["path"] == "/v1/workspaces"
     assert cap["json"] is None   # genuinely NO body (helper no longer coerces None → {})
     assert cap["params"] == {}
+
+
+# --- workspace routing on capture (#385 UC1) --------------------------------
+# The workspace target travels as a HEADER, not a body field. Two header names
+# exist for the one concept and the honored one depends on the auth plane
+# (X-MI-Workspace = API-key plane, which is what this package uses;
+# X-Workspace-Id = JWT plane, what the remote MCP sends), so the client sends
+# both. These pin that, because a routing header that silently stops being sent
+# looks exactly like a working capture — it just lands in the wrong workspace.
+
+@pytest.mark.asyncio
+async def test_capture_sends_both_workspace_routing_headers():
+    client, cap = _capturing_client()
+    await client.capture("hello", workspace_id="01JWORKSPACEULID0000000000")
+    headers = cap["headers"] or {}
+    assert headers.get("X-MI-Workspace") == "01JWORKSPACEULID0000000000", (
+        "API-key plane header missing — deps.py::get_api_key reads X-MI-Workspace; "
+        "without it the capture silently lands in the caller's home workspace"
+    )
+    assert headers.get("X-Workspace-Id") == "01JWORKSPACEULID0000000000", (
+        "JWT-plane header missing — deps.py::get_api_key_or_jwt reads X-Workspace-Id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_capture_workspace_id_is_not_a_body_field():
+    """workspace_id must NOT leak into the /v1/process body: the API has no such
+    request-model field, and `scope_id` (which IS a body field) is a different
+    axis entirely. Sending it in the body would be a silent no-op."""
+    client, cap = _capturing_client()
+    await client.capture("hello", workspace_id="01JWORKSPACEULID0000000000")
+    assert "workspace_id" not in cap["json"]
+
+
+@pytest.mark.asyncio
+async def test_capture_without_workspace_sends_no_routing_headers():
+    """Personal is the default: an untargeted capture must send no routing header
+    at all, so the server's own home-binding decides where it lands."""
+    client, cap = _capturing_client()
+    await client.capture("hello")
+    assert cap["headers"] is None
+
+
+@pytest.mark.asyncio
+async def test_ask_sends_workspace_routing_headers():
+    """#385 UC2 — the read side routes by the same headers as capture."""
+    client, cap = _capturing_client()
+    await client.ask("q", workspace_id="01JWORKSPACEULID0000000000")
+    headers = cap["headers"] or {}
+    assert headers.get("X-MI-Workspace") == "01JWORKSPACEULID0000000000"
+    assert headers.get("X-Workspace-Id") == "01JWORKSPACEULID0000000000"
+    assert "workspace_id" not in cap["json"], "workspace_id is a header, not a body field"
+
+
+@pytest.mark.asyncio
+async def test_list_sends_workspace_routing_headers():
+    client, cap = _capturing_client()
+    await client.list_memories(workspace_id="01JWORKSPACEULID0000000000")
+    headers = cap["headers"] or {}
+    assert headers.get("X-MI-Workspace") == "01JWORKSPACEULID0000000000"
+    assert headers.get("X-Workspace-Id") == "01JWORKSPACEULID0000000000"
+    assert "workspace_id" not in cap["params"], "workspace_id is a header, not a query param"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", ["ask", "list"])
+async def test_untargeted_reads_send_no_routing_headers(call):
+    client, cap = _capturing_client()
+    if call == "ask":
+        await client.ask("q")
+    else:
+        await client.list_memories()
+    assert cap["headers"] is None
+
+
+@pytest.mark.asyncio
+async def test_health_request_shape():
+    """The read-isolation probe (#385 UC2) — a plain GET /health, no body."""
+    client, cap = _capturing_client()
+    await client.health()
+    assert cap["method"] == "GET"
+    assert cap["path"] == "/health"
+    assert cap["json"] is None
+    assert cap["params"] == {}
+
+
+@pytest.mark.asyncio
+async def test_capture_scope_id_does_not_route_to_a_workspace():
+    """scope_id is governance scope, not workspace routing — it must never
+    produce a routing header. (The mi_workspaces tool description used to tell
+    agents to pass a workspace ULID as scope_id; that never routed anything.)"""
+    client, cap = _capturing_client()
+    await client.capture("hello", scope="project", scope_id="01JPROJECTULID00000000000")
+    assert cap["headers"] is None
+    assert cap["json"]["scope_id"] == "01JPROJECTULID00000000000"

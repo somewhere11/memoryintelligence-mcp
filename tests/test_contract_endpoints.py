@@ -30,6 +30,7 @@ MCP_ENDPOINTS = [
     ("post", "/v1/umo/match"),               # mi_match
     ("get", "/v1/accounts/me"),              # mi_account
     ("get", "/v1/workspaces"),               # mi_workspaces (#1320)
+    ("get", "/health"),                      # workspace read-isolation probe (#385 UC2)
 ]
 
 _HTTP = {"get", "post", "put", "patch", "delete"}

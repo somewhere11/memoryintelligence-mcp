@@ -124,8 +124,12 @@ class MIClient:
         json: dict | None = None,
         params: dict | None = None,
         idempotent: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Make an API request and return the JSON response.
+
+        ``headers`` are merged over the client's defaults for this one request
+        (used by the workspace-routing headers — see ``_workspace_headers``).
 
         Idempotent reads (ask/list/explain/verify/match/account_info) are retried
         on a read timeout or a transient 5xx, with exponential backoff. The hosted
@@ -140,7 +144,9 @@ class MIClient:
         for attempt in range(attempts):
             is_last = attempt + 1 >= attempts
             try:
-                resp = await self._http.request(method, path, json=json, params=params)
+                resp = await self._http.request(
+                    method, path, json=json, params=params, headers=headers
+                )
             except httpx.TimeoutException:
                 if is_last:
                     raise
@@ -169,6 +175,30 @@ class MIClient:
 
     # ----- Core operations -----
 
+    @staticmethod
+    def _workspace_headers(workspace_id: str | None) -> dict[str, str] | None:
+        """Headers that route a request to a specific workspace (#385 UC1).
+
+        BOTH names are sent on purpose — the API has two headers for this one
+        concept, and which one is honored depends on the auth plane:
+
+        * ``X-MI-Workspace``  — the API-KEY plane (``deps.py::get_api_key``, #736).
+          This is the one that matters for this package, which always authenticates
+          with an ``mi_sk_*`` / ``mi_beta_*`` key.
+        * ``X-Workspace-Id``  — the JWT plane (``deps.py::get_api_key_or_jwt``),
+          which is what the REMOTE MCP surface (``api/public/mcp_resource.py``)
+          sends. ``get_api_key_or_jwt`` forwards only ``X-MI-Workspace`` down to
+          ``get_api_key``, so a key-authenticated ``X-Workspace-Id`` is IGNORED.
+
+        Sending both means routing is correct on either plane instead of silently
+        no-op'ing if this client is ever pointed at a JWT-authenticated deployment.
+        The unhonored name is inert, and both planes fail CLOSED (403) on a
+        workspace the caller is not a member of — enforcement stays server-side.
+        """
+        if not workspace_id:
+            return None
+        return {"X-MI-Workspace": workspace_id, "X-Workspace-Id": workspace_id}
+
     async def capture(
         self,
         content: str,
@@ -176,6 +206,7 @@ class MIClient:
         source: str | None = None,
         scope: str | None = None,
         scope_id: str | None = None,
+        workspace_id: str | None = None,
         retention_policy: str | None = None,
         pii_handling: str | None = None,
         metadata: dict | None = None,
@@ -188,6 +219,14 @@ class MIClient:
         capture persists as a parent + one child per claim, each independently
         recallable. Short single-claim captures stay a single UMO (the server's
         <=1-claim guard), so this is safe to leave on by default.
+
+        ``workspace_id`` (#385 UC1) routes the capture to a specific workspace via
+        the routing headers. Omit it and the capture goes to the caller's HOME
+        workspace (the server's agent-source home-binding), which is personal for
+        most users. The server validates membership and 403s a workspace the caller
+        does not belong to — this client cannot route anywhere it shouldn't.
+        ``scope``/``scope_id`` are a DIFFERENT axis (governance scope in the request
+        body); they do not route between workspaces.
         """
         payload: dict[str, Any] = {
             "content": content,
@@ -210,7 +249,10 @@ class MIClient:
         if metadata:
             payload["metadata"] = metadata
 
-        return await self._request("POST", "/v1/process", json=payload)
+        return await self._request(
+            "POST", "/v1/process", json=payload,
+            headers=self._workspace_headers(workspace_id),
+        )
 
     async def ask(
         self,
@@ -218,6 +260,7 @@ class MIClient:
         *,
         scope: str | None = None,
         scope_id: str | None = None,
+        workspace_id: str | None = None,
         limit: int = 10,
         offset: int = 0,
         explain: str | bool = "none",
@@ -226,7 +269,13 @@ class MIClient:
         topics: list[str] | None = None,
         entities: list[str] | None = None,
     ) -> dict[str, Any]:
-        """POST /v1/memories/query — semantic search across memories."""
+        """POST /v1/memories/query — semantic search across memories.
+
+        ``workspace_id`` (#385 UC2) targets a workspace you are a member of; omit
+        for personal (owner-scoped) search. Same routing headers as capture. Note
+        the server only *widens* the read to every member's memories when its
+        workspace read-isolation flag is on — see ``health()``.
+        """
         payload: dict[str, Any] = {
             "query": query,
             "scope": scope or self._config.default_scope,
@@ -253,7 +302,8 @@ class MIClient:
             payload["entities"] = entities
 
         return await self._request(
-            "POST", "/v1/memories/query", json=payload, idempotent=True
+            "POST", "/v1/memories/query", json=payload, idempotent=True,
+            headers=self._workspace_headers(workspace_id),
         )
 
     async def list_memories(
@@ -262,12 +312,33 @@ class MIClient:
         limit: int = 20,
         offset: int = 0,
         scope: str | None = None,
+        workspace_id: str | None = None,
     ) -> dict[str, Any]:
-        """GET /v1/memories — list UMOs with pagination."""
+        """GET /v1/memories — list UMOs with pagination.
+
+        ``workspace_id`` (#385 UC2) targets a workspace you are a member of; omit
+        for personal. See :meth:`ask` for the read-isolation caveat.
+        """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if scope:
             params["scope"] = scope
-        return await self._request("GET", "/v1/memories", params=params, idempotent=True)
+        return await self._request(
+            "GET", "/v1/memories", params=params, idempotent=True,
+            headers=self._workspace_headers(workspace_id),
+        )
+
+    async def health(self) -> dict[str, Any]:
+        """GET /health — server status + capability discovery.
+
+        Used for one thing here: reading
+        ``capabilities.workspace_read_isolation.enabled``, which decides whether a
+        workspace-targeted READ actually returns every member's memories or only
+        the caller's own. Without it a workspace read looks successful and
+        identical to a personal one, and any "searched the team workspace" claim
+        would be unverifiable. Unauthenticated on the server side; we send the
+        client's normal headers anyway (harmless).
+        """
+        return await self._request("GET", "/health", idempotent=True)
 
     async def explain(self, umo_id: str, *, level: str = "full") -> dict[str, Any]:
         """GET /v1/memories/{id}/explain — UMO introspection."""

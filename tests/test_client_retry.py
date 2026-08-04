@@ -32,7 +32,7 @@ def _client_with_scripted_responses(behaviors):
     client = MIClient(MIConfig(api_key="test-key"))
     calls = {"n": 0}
 
-    async def fake_http_request(method, path, *, json=None, params=None):
+    async def fake_http_request(method, path, *, json=None, params=None, headers=None):
         i = calls["n"]
         calls["n"] += 1
         behavior = behaviors[min(i, len(behaviors) - 1)]

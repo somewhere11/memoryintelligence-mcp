@@ -58,8 +58,10 @@ logger = logging.getLogger("mi_mcp")
 # product's core claim ("we cite, we don't hallucinate") — hiding it behind
 # MI_MCP_FULL meant the differentiator was invisible on the surface agents use.
 # mi_workspaces joins the default surface (0.2.6, #1320): workspace routing is a
-# first-class concept (mi_capture takes scope/scope_id), and tool-surface parity
-# with the remote MCP means "does mi_workspaces exist" answers the same both ways.
+# first-class concept (mi_capture takes workspace_id — 0.2.7, #385 UC1; NOT
+# scope/scope_id, which is the separate governance-scope axis), and tool-surface
+# parity with the remote MCP means "does mi_workspaces exist" answers the same
+# both ways.
 V0_VISIBLE_TOOLS = frozenset({
     "mi_capture", "mi_upload", "mi_ask", "mi_list", "mi_forget", "mi_verify",
     "mi_workspaces",
@@ -265,7 +267,11 @@ async def _route_ask(config: MIConfig, client: MIClient, arguments: dict) -> Any
     limit = arguments.get("limit", 10)
     offset = arguments.get("offset", 0)
     advanced = any(arguments.get(k) for k in ("date_from", "date_to", "topics", "scope_id"))
-    if localreads.available(config) and not advanced:
+    # A workspace-targeted read MUST go to the cloud (#385 UC2). The on-device index
+    # has no workspace concept at all — serving it locally would answer from personal
+    # memories while the response claimed a workspace scope. Same reason `advanced`
+    # forces cloud: local v0 cannot honor the filter, so it must not pretend to.
+    if localreads.available(config) and not advanced and not arguments.get("workspace_id"):
         try:
             return localreads.ask_local(
                 arguments["query"], limit=limit, offset=offset,
@@ -276,7 +282,8 @@ async def _route_ask(config: MIConfig, client: MIClient, arguments: dict) -> Any
     return await client.ask(
         query=arguments["query"], limit=limit, offset=offset,
         explain=arguments.get("explain", "none"), scope=arguments.get("scope"),
-        scope_id=arguments.get("scope_id"), date_from=arguments.get("date_from"),
+        scope_id=arguments.get("scope_id"), workspace_id=arguments.get("workspace_id"),
+        date_from=arguments.get("date_from"),
         date_to=arguments.get("date_to"), topics=arguments.get("topics"),
         entities=arguments.get("entities"),
     )
@@ -285,12 +292,219 @@ async def _route_ask(config: MIConfig, client: MIClient, arguments: dict) -> Any
 async def _route_list(config: MIConfig, client: MIClient, arguments: dict) -> Any:
     limit = arguments.get("limit", 20)
     offset = arguments.get("offset", 0)
-    if localreads.available(config):
+    # See _route_ask: a workspace target is not answerable from the local index.
+    if localreads.available(config) and not arguments.get("workspace_id"):
         try:
             return localreads.list_local(limit=limit, offset=offset)
         except Exception as e:
             logger.warning("local mi_list failed (%s) — falling back to cloud", e)
-    return await client.list_memories(limit=limit, offset=offset, scope=arguments.get("scope"))
+    return await client.list_memories(
+        limit=limit, offset=offset, scope=arguments.get("scope"),
+        workspace_id=arguments.get("workspace_id"),
+    )
+
+
+# =============================================================================
+# Workspace READS for mi_ask / mi_list (#385 UC2) — module-level, testable
+# =============================================================================
+# Symmetric with mi_capture's routing (D3 = option A): omit workspace_id → personal
+# (owner-scoped, the default); pass one you're a member of → that workspace. Reads
+# are non-destructive, so there is NO confirm — but a non-member target is REFUSED
+# rather than silently downgraded to personal, so the reported scope is never a lie.
+#
+# ⚠️ THE THING THIS SURFACE MUST NOT OVERCLAIM.
+# Whether a workspace read actually returns OTHER members' memories is decided
+# server-side by the read-isolation flag (`MI_WORKSPACE_READ_ISOLATION`, #736),
+# which is **OFF by default** and blocked behind a pre-flip audit (#1112). With it
+# off, `auth["workspace_id"]` is None, so `workspace_scope` is False and the read
+# stays owner-scoped — a member-targeted read returns EXACTLY what a personal one
+# returns. Nothing in the read response reveals which happened.
+#
+# So we ask the server (`/health` → capabilities.workspace_read_isolation) and put
+# the answer in the scope block as `member_wide_reads`. An agent that reads
+# `shared: true, member_count: 4` would otherwise reasonably tell the user "I
+# searched the whole team workspace" when it searched only their own memories.
+
+_WIDENING_UNKNOWN = "unknown"
+_widening_cache: dict = {}  # base_url -> bool; per-process, only cached on success
+
+
+async def _member_wide_reads_enabled(client: MIClient):
+    """True/False if the server told us, else ``"unknown"`` — never a guess.
+
+    Cached per process: the flag is an env var, so it cannot change without a
+    redeploy, and a read must not pay a /health round-trip every call.
+    """
+    key = str(getattr(client, "_config", None) and client._config.base_url)
+    if key in _widening_cache:
+        return _widening_cache[key]
+    try:
+        health = await client.health()
+        caps = (health or {}).get("capabilities") or {}
+        enabled = (caps.get("workspace_read_isolation") or {}).get("enabled")
+    except Exception as e:
+        logger.warning("workspace read-isolation probe failed (%s) — reporting unknown", e)
+        return _WIDENING_UNKNOWN
+    if not isinstance(enabled, bool):
+        # An older server that predates the capability. Do NOT infer a value —
+        # "unknown" is the honest answer and stays uncached so a later deploy
+        # can start answering.
+        return _WIDENING_UNKNOWN
+    _widening_cache[key] = enabled
+    return enabled
+
+
+def _with_scope(shaped: Any, scope: dict) -> Any:
+    """Attach the read's scope block to a shaped result — workspace reads only.
+
+    A PERSONAL read is returned byte-identical to before UC2 existed: no wrapper,
+    no extra key. The rule an agent can rely on is "a `scope` block means you
+    targeted a workspace; its absence means personal", and existing behaviour is
+    untouched for every call that doesn't opt in.
+
+    `_shape_ask` yields a dict (gets the key) and `_shape_list` yields a bare list
+    (gets wrapped in `{scope, items}`), so both carry it the same way.
+    """
+    if scope.get("scope") != "workspace":
+        return shaped
+    if isinstance(shaped, dict):
+        return {**shaped, "scope": scope}
+    return {"scope": scope, "items": shaped}
+
+
+async def _resolve_read_scope(client: MIClient, workspace_id: str | None):
+    """Resolve the scope of a read. Returns ``(scope, blocked)``.
+
+    ``blocked`` is an error payload to return INSTEAD of reading, or None.
+    """
+    if not workspace_id:
+        return {"scope": "personal", "shared": False}, None
+
+    listing = await client.workspaces()
+    entries = (listing or {}).get("workspaces") or []
+    info = next(
+        (w for w in entries if isinstance(w, dict) and w.get("workspace_id") == workspace_id),
+        None,
+    )
+    if info is None:
+        return None, {
+            "status": "not_a_member",
+            "message": (
+                "You are not a member of the requested workspace — call mi_workspaces "
+                "to see the ones you can read, or omit workspace_id to search your "
+                "personal memories."
+            ),
+        }
+
+    member_count = info.get("member_count") or 1
+    widening = await _member_wide_reads_enabled(client)
+    scope = {
+        "scope": "workspace",
+        "workspace_id": workspace_id,
+        "name": info.get("name"),
+        "role": info.get("role"),
+        "shared": member_count > 1,
+        "member_count": member_count,
+        # The honest bit — see the block comment above.
+        "member_wide_reads": widening,
+    }
+    if widening is not True and member_count > 1:
+        scope["note"] = (
+            "This workspace has other members, but the server is NOT returning their "
+            "memories — workspace read-isolation is "
+            + ("off" if widening is False else "of unknown state")
+            + " on this deployment, so this read is scoped to your own memories only. "
+            "Do not tell the user you searched the whole team workspace."
+        )
+    return scope, None
+
+
+# =============================================================================
+# Workspace routing for mi_capture (#385 UC1 + UC1.5) — module-level, testable
+# =============================================================================
+# Mirrors the REMOTE surface's contract (api/public/mcp_resource.py::_capture) so
+# both MCP surfaces route captures identically:
+#
+#   1. PERSONAL IS THE DEFAULT. No workspace_id → no routing header, no extra
+#      round-trip, behaviour unchanged from before this existed.
+#   2. A write to a genuinely SHARED workspace (>1 member) requires an explicit
+#      confirm and saves NOTHING without it — a single silent call can never post
+#      to a team space. Because the agent must seek approval per conversation, a
+#      brand-new chat cannot inherit a shared write.
+#   3. EVERY routed capture NAMES its destination in the response, so a capture is
+#      never blind about where it landed.
+#
+# The real authorization gate is server-side (deps.py validates membership and
+# 403s a non-member). This mirrors it so the *feedback* is accurate — the agent
+# should never tell the user "saved to Somewhere Inc" when the server refused.
+
+async def _resolve_capture_destination(client: MIClient, workspace_id: str | None):
+    """Resolve where a capture will land. Returns ``(destination, blocked)``.
+
+    ``blocked`` is a confirm_required payload to return INSTEAD of capturing, or
+    None to proceed. Raises MIAPIError if the workspace lookup itself fails — a
+    capture is never routed on an unverified destination.
+    """
+    if not workspace_id:
+        return {"scope": "personal", "shared": False}, None
+
+    listing = await client.workspaces()
+    entries = (listing or {}).get("workspaces") or []
+    info = next(
+        (w for w in entries if isinstance(w, dict) and w.get("workspace_id") == workspace_id),
+        None,
+    )
+    if info is None:
+        # Not a member (or no such workspace) — refuse locally rather than let the
+        # server 403 with a message the agent would have to interpret. Same
+        # least-disclosure posture as the API: we don't say which of the two it is.
+        return None, {
+            "status": "not_a_member",
+            "message": (
+                "You are not a member of the requested workspace — call mi_workspaces "
+                "to see the ones you can capture into, or omit workspace_id to keep "
+                "this memory personal."
+            ),
+        }
+
+    member_count = info.get("member_count") or 1
+    destination = {
+        "scope": "workspace",
+        "workspace_id": workspace_id,
+        "name": info.get("name"),
+        "role": info.get("role"),
+        "shared": member_count > 1,
+        "member_count": member_count,
+    }
+    return destination, None
+
+
+def _confirmed(arguments: dict) -> bool:
+    """True only when `confirm` is the LITERAL boolean true.
+
+    Not truthiness. The tool schema declares a boolean, but the caller is a language
+    model and an argument can arrive as the STRING ``"false"`` — for which ``bool()``
+    is True, opening a gate the user never opened. Every confirm gate on this surface
+    (the destructive-tool check for mi_forget, and the shared-write check for
+    mi_capture) fails closed on anything that is not literally ``true``.
+    """
+    return arguments.get("confirm") is True
+
+
+def _shared_write_confirm_required(destination: dict, confirm: bool) -> dict | None:
+    """The UC1.5 hard gate: a SHARED destination without confirm=true saves nothing."""
+    if not destination.get("shared") or confirm:
+        return None
+    return {
+        "status": "confirm_required",
+        "destination": destination,
+        "message": (
+            f"This will post to '{destination.get('name')}', a SHARED workspace with "
+            f"{destination.get('member_count')} members — everyone in it will see it. "
+            f"Nothing has been saved. Confirm with the user, then re-call mi_capture "
+            f"with confirm=true. Omit workspace_id to keep it personal instead."
+        ),
+    }
 
 
 # =============================================================================
@@ -417,7 +631,27 @@ def create_server(config: MIConfig | None = None) -> Server:
                             "type": "string",
                             "description": (
                                 "Scope identifier (required for client/project/team scopes). "
-                                "E.g., a project ULID."
+                                "E.g., a project ULID. NOT a workspace — use workspace_id "
+                                "to route this memory to a workspace."
+                            ),
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "description": (
+                                "Target workspace ULID to route this memory to (e.g. a shared "
+                                "team space). Omit to keep it PERSONAL (the default). Call "
+                                "mi_workspaces to list your workspaces + IDs. You must be a "
+                                "member; the server rejects anything else."
+                            ),
+                        },
+                        "confirm": {
+                            "type": "boolean",
+                            "description": (
+                                "Required to post into a SHARED workspace (>1 member). Without "
+                                "it, mi_capture returns a confirm_required preview and saves "
+                                "NOTHING — ask the user before setting confirm=true. Never set "
+                                "it yourself for a shared workspace without the user's explicit "
+                                "approval."
                             ),
                         },
                         "retention_policy": {
@@ -485,7 +719,19 @@ def create_server(config: MIConfig | None = None) -> Server:
                         },
                         "scope_id": {
                             "type": "string",
-                            "description": "Scope identifier for filtering.",
+                            "description": "Scope identifier for filtering. NOT a workspace.",
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "description": (
+                                "Search a workspace you are a member of instead of your "
+                                "personal memories. Omit for PERSONAL (the default). Call "
+                                "mi_workspaces for IDs. The result's `scope` block reports "
+                                "what was actually searched — including `member_wide_reads`, "
+                                "which is false when the server is NOT returning other "
+                                "members' memories. Read it before telling the user you "
+                                "searched a whole team workspace."
+                            ),
                         },
                         "date_from": {
                             "type": "string",
@@ -532,7 +778,17 @@ def create_server(config: MIConfig | None = None) -> Server:
                         "scope": {
                             "type": "string",
                             "enum": ["user", "client", "project", "team", "org", "all"],
-                            "description": "Scope to list. Default: 'user'.",
+                            "description": "Scope to list. Default: 'user'. NOT a workspace.",
+                        },
+                        "workspace_id": {
+                            "type": "string",
+                            "description": (
+                                "List a workspace you are a member of instead of your "
+                                "personal memories. Omit for PERSONAL (the default). Call "
+                                "mi_workspaces for IDs. See the result's `scope` block — "
+                                "`member_wide_reads` tells you whether other members' "
+                                "memories are actually included."
+                            ),
                         },
                     },
                 },
@@ -742,10 +998,11 @@ def create_server(config: MIConfig | None = None) -> Server:
                 # both surfaces answer "what workspaces do I have" identically.
                 name="mi_workspaces",
                 description=(
-                    "List the workspaces you can capture into — id, name, your "
-                    "role, member count. Use a workspace's id as mi_capture's scope_id "
-                    "(with scope) to route a memory there. The first entry is your "
-                    "default (home) workspace."
+                    "List the workspaces you can capture into and read from — id, "
+                    "name, your role, member count. Use a workspace's id as the "
+                    "workspace_id of mi_capture (route a memory there), mi_ask or "
+                    "mi_list (read it). The first entry is your default (home) "
+                    "workspace."
                 ),
                 inputSchema={
                     "type": "object",
@@ -795,7 +1052,7 @@ def create_server(config: MIConfig | None = None) -> Server:
                 }))]
 
             # Human-in-the-loop for destructive (irreversible) ops.
-            if name in DESTRUCTIVE_TOOLS and arguments.get("confirm") is not True:
+            if name in DESTRUCTIVE_TOOLS and not _confirmed(arguments):
                 logger.info(f"[CONFIRM] {name} requires confirm=true")
                 return [TextContent(type="text", text=_fmt({
                     "status": "confirmation_required",
@@ -830,6 +1087,32 @@ def create_server(config: MIConfig | None = None) -> Server:
 
             match name:
                 case "mi_capture":
+                    # Workspace routing (#385 UC1): resolve + name the destination
+                    # BEFORE writing, and hard-gate a shared-workspace write on an
+                    # explicit confirm (UC1.5). Personal (no workspace_id) costs no
+                    # extra round-trip and is unchanged.
+                    ws_id = arguments.get("workspace_id")
+                    destination, blocked = await _resolve_capture_destination(client, ws_id)
+                    if blocked is not None:
+                        return [TextContent(type="text", text=_fmt(blocked))]
+                    # _confirmed(), not bool(): a shared-workspace write is a hard
+                    # safety contract and `bool("false")` is True — see the helper.
+                    needs_confirm = _shared_write_confirm_required(
+                        destination, _confirmed(arguments)
+                    )
+                    if needs_confirm is not None:
+                        logger.info(
+                            "[WORKSPACE] mi_capture held for confirm — shared workspace %s "
+                            "(%s members); nothing saved",
+                            ws_id, destination.get("member_count"),
+                        )
+                        return [TextContent(type="text", text=_fmt(needs_confirm))]
+                    if destination.get("shared"):
+                        logger.info(
+                            "[WORKSPACE] confirmed shared-workspace capture ws=%s members=%s",
+                            ws_id, destination.get("member_count"),
+                        )
+
                     # Claim-granular by default (#446); an agent can opt out per call.
                     # source: caller's own value wins; else the connector-origin tag
                     # from the gate (a no-project-cwd surface), else the config default.
@@ -838,22 +1121,39 @@ def create_server(config: MIConfig | None = None) -> Server:
                         source=arguments.get("source") or capture_source_hint,
                         scope=arguments.get("scope"),
                         scope_id=arguments.get("scope_id"),
+                        workspace_id=ws_id,
                         retention_policy=arguments.get("retention_policy"),
                         pii_handling=arguments.get("pii_handling"),
                         metadata=arguments.get("metadata"),
                         claim_granular=arguments.get("claim_granular", True),
                         claim_level=arguments.get("claim_level"),
                     )
+                    if isinstance(result, dict):
+                        result["destination"] = destination  # where it actually landed
                     return [TextContent(type="text", text=_fmt(result))]
 
                 case "mi_ask":
+                    # #385 UC2: resolve + report the read scope. A non-member target
+                    # is refused rather than silently downgraded to personal.
+                    scope, blocked = await _resolve_read_scope(
+                        client, arguments.get("workspace_id")
+                    )
+                    if blocked is not None:
+                        return [TextContent(type="text", text=_fmt(blocked))]
                     result = await _route_ask(config, client, arguments)
+                    shaped = _shape_ask(result, explain=arguments.get("explain", "none"))
                     return [TextContent(type="text", text=_fmt_untrusted(
-                        _shape_ask(result, explain=arguments.get("explain", "none"))))]
+                        _with_scope(shaped, scope)))]
 
                 case "mi_list":
+                    scope, blocked = await _resolve_read_scope(
+                        client, arguments.get("workspace_id")
+                    )
+                    if blocked is not None:
+                        return [TextContent(type="text", text=_fmt(blocked))]
                     result = await _route_list(config, client, arguments)
-                    return [TextContent(type="text", text=_fmt_untrusted(_shape_list(result)))]
+                    return [TextContent(type="text", text=_fmt_untrusted(
+                        _with_scope(_shape_list(result), scope)))]
 
                 case "mi_explain":
                     result = await client.explain(
@@ -870,7 +1170,7 @@ def create_server(config: MIConfig | None = None) -> Server:
                     # Destructive: honor the confirm gate the tool schema advertises.
                     # Without confirm=true, return confirmation_required and delete
                     # nothing — an injected or accidental call can't silently destroy.
-                    if not arguments.get("confirm"):
+                    if not _confirmed(arguments):
                         return [TextContent(type="text", text=_fmt({
                             "status": "confirmation_required",
                             "umo_id": arguments["umo_id"],
