@@ -452,9 +452,75 @@ def cmd_wire(argv: list[str]) -> int:
     return 0
 
 
+#: PyPI project name — the package this CLI ships as.
+PYPI_PROJECT = "memoryintelligence-mcp"
+
+#: Set truthy to skip doctor's release check entirely (no network call at all).
+NO_VERSION_CHECK_ENV = "MI_MCP_NO_VERSION_CHECK"
+
+
+def _version_tuple(v: str) -> tuple:
+    """`"0.2.10"` → `(0, 2, 10)` for ordering. Non-numeric parts sort as -1.
+
+    Deliberately not `packaging.version` — it is not a declared dependency, and a
+    doctor check must never be the thing that fails to import.
+    """
+    parts: list = []
+    for chunk in (v or "").strip().split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else -1)
+    return tuple(parts)
+
+
+def _latest_pypi_version(project: str = PYPI_PROJECT, timeout: float = 2.0) -> str | None:
+    """Newest version on PyPI, or None if it cannot be determined. Never raises.
+
+    Uses the **simple index** (PEP 691), NOT ``/pypi/<project>/json``. Learned the
+    hard way on 2026-08-04: minutes after 0.2.7 published, the aggregate JSON
+    endpoint was still serving a cached ``0.2.5`` while the simple index was already
+    correct. A doctor that reads the stale endpoint would tell a user they are
+    up to date when they are not — the exact failure this check exists to prevent.
+    """
+    import urllib.request
+
+    url = f"https://pypi.org/simple/{project}/"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.pypi.simple.v1+json",
+            "User-Agent": f"mi-mcp/{__version__}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed https URL)
+            versions = json.loads(resp.read().decode("utf-8")).get("versions") or []
+    except Exception:
+        return None  # offline, DNS, timeout, 5xx, schema change — all "unknown"
+    real = [v for v in versions if _version_tuple(v) != (-1,)]
+    return max(real, key=_version_tuple) if real else None
+
+
+def _upgrade_command() -> str:
+    """The upgrade command for THIS install, not a generic guess.
+
+    `pip` is wrong for most installs of this package and is not even present on
+    some machines (Homebrew python is PEP-668 externally-managed), so guessing
+    costs the user a failed command and a detour. Detect from the interpreter's
+    location instead.
+    """
+    prefix = str(Path(sys.prefix).resolve())
+    if f"{os.sep}uv{os.sep}tools{os.sep}" in prefix + os.sep:
+        return f"uv tool upgrade {PYPI_PROJECT}"
+    if f"{os.sep}pipx{os.sep}venvs{os.sep}" in prefix + os.sep or os.environ.get("PIPX_HOME"):
+        return f"pipx upgrade {PYPI_PROJECT}"
+    return f"{Path(sys.executable).name} -m pip install --upgrade {PYPI_PROJECT}"
+
+
 def cmd_doctor(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="mi-mcp doctor")
     ap.add_argument("--home", default=os.environ.get("HOME"))
+    ap.add_argument("--no-version-check", action="store_true",
+                    help="skip the PyPI release check (no network call)")
     args = ap.parse_args(argv)
     home = Path(args.home)
 
@@ -465,6 +531,31 @@ def cmd_doctor(argv: list[str]) -> int:
         if critical and not good:
             ok = False
         print(f"  [{'✓' if good else '✗'}] {label}" + (f"  {detail}" if detail else ""))
+
+    # Release check FIRST — being two versions behind explains most "the tool
+    # doesn't have X" reports, and it is the one thing nothing else surfaces.
+    # Non-critical: out of date is not broken, so it never fails doctor's exit code.
+    # Opt out with --no-version-check or MI_MCP_NO_VERSION_CHECK=1; the call is an
+    # anonymous PyPI index fetch (same as any install) and is skipped entirely then.
+    skip_vc = args.no_version_check or os.environ.get(
+        NO_VERSION_CHECK_ENV, ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if skip_vc:
+        check("version", True, f"{__version__} (release check skipped)", critical=False)
+    else:
+        latest = _latest_pypi_version()
+        if latest is None:
+            # Unknown is NOT "up to date" — say so rather than imply green.
+            check("version", True,
+                  f"{__version__} installed — could not reach PyPI, latest unknown",
+                  critical=False)
+        elif _version_tuple(latest) > _version_tuple(__version__):
+            check("version", False,
+                  f"{__version__} installed, {latest} available — "
+                  f"`{_upgrade_command()} && mi-mcp wire`",
+                  critical=False)
+        else:
+            check("version", True, f"{__version__} (latest)", critical=False)
 
     bin_path = _mi_mcp_bin()
     check("mi-mcp binary", Path(bin_path).exists(), bin_path)

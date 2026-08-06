@@ -3,6 +3,43 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.8] — 2026-08-04
+
+### Added — `mi-mcp doctor` tells you when you're behind
+Doctor reported the binary, PATH, wrapper, key, allowlist, vault and wiring — and
+not one word about **which version it was running**. So the most common way to be
+broken was invisible: a user on 0.2.5 asking why the workspace tools "don't exist",
+when they exist fine and the install is two releases old.
+
+Doctor now checks PyPI and reports as its **first** line:
+
+```
+[✗] version  0.2.5 installed, 0.2.8 available — `uv tool upgrade memoryintelligence-mcp && mi-mcp wire`
+```
+
+Details that matter:
+
+- **The upgrade command matches how you actually installed it** — `uv tool` /
+  `pipx` / `pip`, detected from the interpreter's location. Suggesting `pip` to a
+  uv-tool user is a dead end; on a Homebrew Python, `pip` may not exist at all
+  and is PEP-668 externally-managed regardless.
+- **`mi-mcp wire` is in the suggestion on purpose.** Upgrading across 0.2.6 without
+  re-wiring leaves your config pointing at a server id that no longer announces
+  itself, and the tools silently disappear.
+- **Out of date never fails doctor's exit code** — behind is not broken, and scripts
+  that gate on `mi-mcp doctor` must not start failing the day a release lands.
+- **Unreachable PyPI reports "latest unknown", never "up to date".** Offline is not
+  evidence of being current.
+- **Opt out** with `--no-version-check` or `MI_MCP_NO_VERSION_CHECK=1`. Then **no
+  request is made at all** — not a request whose answer is ignored. The check is an
+  anonymous PyPI index fetch, the same one any install performs.
+
+It reads the **simple index** (PEP 691), not `/pypi/<project>/json`. The aggregate
+endpoint is CDN-cached and was observed serving a stale version for minutes after
+0.2.7 published — a doctor reading it would confidently tell a user they were
+current when they were two releases behind, which is precisely the bug this check
+exists to prevent.
+
 ## [0.2.7] — 2026-08-03
 
 ### Added — `mi_ask` / `mi_list` take a `workspace_id` (#385 UC2)

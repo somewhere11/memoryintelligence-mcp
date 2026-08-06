@@ -183,10 +183,22 @@ Never paste the key into an MCP client config.
 
 **Repair / inspect without re-running setup:**
 ```bash
-mi-mcp doctor           # checks binary, PATH, key, wiring, opt-in, vault path
+mi-mcp doctor           # checks version, binary, PATH, key, wiring, opt-in, vault path
 mi-mcp status           # wired surfaces + opt-in allowlist
 mi-mcp wire --dry-run   # preview wiring changes
 ```
+
+**Staying current.** `doctor` compares your installed version against PyPI and
+prints the upgrade command for how you actually installed it:
+
+```
+[✗] version  0.2.5 installed, 0.2.8 available — `uv tool upgrade memoryintelligence-mcp && mi-mcp wire`
+```
+
+Run `mi-mcp wire` after any upgrade — 0.2.6 renamed the server, and a config left
+pointing at the old id loses its tools silently. The check is an anonymous PyPI
+index fetch; skip it entirely with `--no-version-check` or
+`MI_MCP_NO_VERSION_CHECK=1`, and it fails quietly when you're offline.
 
 **Which server am I talking to?** The local server announces `mi-local`; the
 remote MCP surface announces `memoryintelligence-remote`. The local default
