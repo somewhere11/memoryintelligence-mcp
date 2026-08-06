@@ -3,10 +3,38 @@ name: Publish to PyPI
 # Runs on the PUBLIC MIRROR only. Trusted Publishing (OIDC) — NO stored token.
 # Flow: push a vX.Y.Z tag -> build+check -> a maintainer APPROVES the protected
 # `pypi` environment -> PyPI publishes with PEP 740 attestations.
+#
+# `workflow_dispatch` is the RECOVERY path, added after 0.2.6 was lost (#1347).
+# A tag push is a ONE-SHOT trigger: if the run is cancelled, or if GitHub never
+# creates it, the tag is spent and there is nothing left to re-run. Both have
+# now happened:
+#   * 0.2.6's publish run BUILT successfully, waited ~20h at the approval gate,
+#     and was cancelled four minutes after 0.2.7 published. It never reached
+#     PyPI and never could again under a push-only trigger.
+#   * during the 2026-08-06 Actions outage the v0.2.8 tag push created no run at
+#     all, and neither did a delete-and-re-push.
+# The only recovery was deleting and re-pushing a public tag — ugly, and it did
+# not work. A maintainer can now re-run a publish for an EXISTING tag.
+#
+# Dispatch weakens nothing:
+#   * the ref must be a real TAG on this repo, shaped vX.Y.Z — branches rejected
+#   * the tag-vs-pyproject version assertion runs identically on both paths
+#   * the protected `pypi` environment still gates the publish job
+#
+# SECURITY NOTE: `inputs.tag` is caller-supplied, so it is never interpolated
+# into `actions/checkout`'s `ref:` and never inlined into a `run:` body. It
+# reaches the shell only through `env:`, quoted, and only after a shape check.
+# (workflow_dispatch already requires write access; this is defence in depth.)
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag to publish (must already exist on this repo)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,18 +43,50 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # No `ref:` here on purpose — see the SECURITY NOTE above. The tag is
+      # resolved and validated in the guarded step below, then checked out.
+      # fetch-depth: 0 so tags exist locally for both verification and checkout.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Resolve, validate, and check out the tag to publish
+        id: ref
+        env:
+          # Caller-supplied on dispatch; empty on the tag-push path.
+          DISPATCH_TAG: ${{ inputs.tag }}
+          PUSH_REF: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then NAME="$DISPATCH_TAG"; else NAME="$PUSH_REF"; fi
+          # Shape check first: only ever a vX.Y.Z release tag.
+          case "$NAME" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::ref must be a vX.Y.Z tag (got: $NAME)"; exit 1 ;;
+          esac
+          # Must be an actual tag on this repo — a branch of the same name is not
+          # acceptable, or dispatch would become "publish arbitrary code".
+          git rev-parse -q --verify "refs/tags/${NAME}" >/dev/null \
+            || { echo "::error::${NAME} is not a tag on this repo — dispatch publishes existing tags only"; exit 1; }
+          git checkout --quiet "refs/tags/${NAME}"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "publishing ${NAME}"
+
       - name: Assert git tag matches package version
         env:
-          REF_NAME: ${{ github.ref_name }}
+          # Same assertion on both paths: what gets published is always the
+          # version the tag names, never whatever happened to be checked out.
+          REF_NAME: ${{ steps.ref.outputs.name }}
         run: |
           TAG="${REF_NAME#v}"
           PKG="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
           echo "tag=$TAG version=$PKG"
           test "$TAG" = "$PKG" || { echo "::error::tag ($TAG) != pyproject version ($PKG)"; exit 1; }
+
       - name: Build + validate
         run: |
           python -m pip install build twine
