@@ -3,6 +3,42 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.9] — 2026-08-09
+
+### Fixed — the thin-install PII floor had drifted behind core (#1464)
+
+`scrub.py` carries its own hard-PII regex floor. On a thin PyPI install it is the
+**only** protection: this package depends on `mcp` / `httpx` / `pydantic` and NOT on
+`memory-intelligence`, so the "strong path" through the core detector is absent for
+every ordinary `pip install memoryintelligence-mcp` user.
+
+That floor fell behind the core detector without anything noticing. **Measured: 7 of
+14 hard-PII cases leaked** to the model context.
+
+Brought to parity for everything a regex can do:
+
+- **SSN** — separator-agnostic. Was hyphen-only, so `412 55 9832` and `412.55.9832`
+  walked straight through.
+- **Phone** — added the `+CC` short form and a **context-anchored** bare 7-digit.
+  `555-0142` and `+1-555-0142` both leaked before, including an exemplar fixture.
+  The bare form is anchored to a telephony keyword rather than matched outright,
+  because a naked `NNN-NNNN` also matches file:line ranges and UUID fragments.
+- **Address** — there was **no address detector at all**. Now covers English,
+  international and compound/glued street forms.
+- **Obfuscation** — NFKC normalisation, zero-width strip and homoglyph folding, so a
+  zero-width-split or Cyrillic-lookalike value is caught.
+- **Email** — tolerates the whitespace-split form.
+
+Result: **15 of 16 cases redact**, with no over-redaction of file:line ranges,
+numeric ranges, migration numbers or numbered headings.
+
+### Known limitation — PERSON
+
+`PERSON` / `ORG` / `LOCATION` need the corpus NER, which a thin install does not
+have. Names are still covered *conditionally*, by the stored-entity belt, when
+capture extracted them. This is asserted in the test suite as a known state rather
+than left implicit.
+
 ## [0.2.8] — 2026-08-04
 
 ### Added — `mi-mcp doctor` tells you when you're behind
