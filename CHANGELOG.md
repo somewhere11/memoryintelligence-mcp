@@ -3,6 +3,50 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.10] — 2026-08-11
+
+### Fixed — the local PII floor over-redacted digit runs and ate the following space (#1586)
+
+```
+in : "the watermark is 1737654321 seconds"
+out: "the watermark is <PHONE>seconds"
+```
+
+`_PHONE_LONG_RE` was `(?:\+?\d[\s().-]?){10,15}` — **any** 10–15 digit run, each digit allowed
+a trailing separator. Two defects compounded:
+
+1. it matched **UNIX epoch seconds**, the most common 10-digit run in MI's own corpus, so a
+   timestamp was redacted as a phone number;
+2. the final iteration's `[\s().-]?` **swallowed the following separator**, gluing the next
+   word to the marker.
+
+**This was not a thin-install-only problem, as originally filed.** `scrub_text` applies the
+`_HARD` floor on top of core's result **unconditionally** (`scrub.py:235`), so a floor looser
+than core does not merely under-serve thin installs — it **overwrites a correct answer with a
+wrong one on every MCP read**. Verified with core importable:
+
+```
+core alone : "the watermark is 1737654321 seconds"   (correct, untouched)
+via floor  : "the watermark is <PHONE>seconds"       (degraded)
+```
+
+One loose pattern split into three precise ones, mirroring `core/security/pii_detector.py`
+rather than inventing a second design:
+
+- **`_PHONE_SEP_RE`** — separated forms. The separators *are* the signal, so no digit-value
+  constraint is needed. Ends on a **digit**, which is defect 2's fix.
+- **`_PHONE_E164_RE`** — the leading `+` is the signal (core measured 0 corpus matches for
+  this shape).
+- **`_PHONE_BARE10_RE`** — defect 1's fix, and the dangerous one. NANP shape excludes epoch
+  seconds **structurally** (they start with `1` until 2033), and an alnum-aware boundary
+  excludes hex-hash digits (`"svo_hash": "914eb6579098371c"` contains a 10-digit run). Core
+  measured **360 → 48 → 1** as those are applied.
+
+21 RED-first cases in `tests/test_scrub_precision.py`, 8 failing before the fix. Every
+precision case has a recall partner (#1456), so closing the over-redaction cannot reopen the
+leak, and the suite is green in **both** install shapes — with core importable and without —
+because the defect and the fix both live in the floor that runs either way.
+
 ## [0.2.9] — 2026-08-09
 
 ### Fixed — the thin-install PII floor had drifted behind core (#1464)
