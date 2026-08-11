@@ -87,7 +87,39 @@ _SSN_RE = re.compile(r"\b(?!000|666|9\d\d)\d{3}[\s.\-]+(?!00)\d{2}[\s.\-]+(?!000
 #: Phone. `_PHONE_LONG` is the pre-existing 10–15 digit run. The short forms are
 #: the #1446/A2 gap: every alternative needed THREE digit groups, so "555-0142"
 #: and "+1-555-0142" leaked — including `pii-phone-001`, an EXEMPLAR fixture.
-_PHONE_LONG_RE = re.compile(r"(?<![\d.])(?:\+?\d[\s().-]?){10,15}(?![\d.])")
+# ⚠️ #1586 — `_PHONE_LONG_RE` was `(?:\+?\d[\s().-]?){10,15}`, i.e. ANY 10–15
+# digit run, with each digit allowed a trailing separator. Two defects fell out
+# of that, and they compounded:
+#
+#   1. it matched UNIX EPOCH SECONDS — 10 digits, and the most common 10-digit
+#      run in MI's own corpus — so `the watermark is 1737654321 seconds` became
+#      `<PHONE>`;
+#   2. the final iteration's `[\s().-]?` SWALLOWED THE FOLLOWING SEPARATOR, so
+#      the next word was glued to the marker: `the watermark is <PHONE>seconds`.
+#
+# This is not merely a thin-install concern. `scrub_text` applies `_HARD` on top
+# of core's result unconditionally, so a floor looser than core *overwrites a
+# correct answer with a wrong one* on every MCP read.
+#
+# Split into three precise patterns, mirroring `core/security/pii_detector.py`:
+#
+#   SEPARATED — the separators themselves are the signal, so no digit-value
+#   constraint is needed. Ends on a DIGIT, which is defect 2's fix.
+_PHONE_SEP_RE = re.compile(
+    r"(?<![\d.])\+?\d{1,4}[\s().\-]+\d(?:[\s().\-]?\d){6,12}(?![\d.])"
+)
+#   E.164 — the leading `+` is the signal. Measured in core: 0 matches across
+#   2,618 of MI's own files, so it needs no further constraint.
+_PHONE_E164_RE = re.compile(r"(?<![\d+])\+[1-9]\d{9,14}(?![\d])")
+#   BARE 10-DIGIT — the dangerous one, and the direct fix for defect 1. Same two
+#   constraints core measured its way to: a NANP shape (area code and exchange
+#   both start 2-9), which excludes epoch seconds structurally because they begin
+#   with `1` until 2033; and an ALNUM-AWARE boundary, because the digits of a hex
+#   hash are still digits (`"svo_hash": "914eb6579098371c"` contains a 10-digit
+#   run). Core measured 360 → 48 → 1 matches as those are applied.
+_PHONE_BARE10_RE = re.compile(
+    r"(?<![0-9A-Za-z._\-:+])[2-9]\d{2}[2-9]\d{6}(?![0-9A-Za-z\-])"
+)
 _PHONE_INTL_SHORT_RE = re.compile(r"(?<![\d])\+\d{1,3}[\s.\-]?\d{3}[\s.\-]\d{4}(?![\d])")
 #: A bare 7-digit run is NOT distinctive — core measured it hitting file:line
 #: ranges, ULID fragments and coordinates — so it is CONTEXT-ANCHORED, as there.
@@ -126,7 +158,12 @@ _HARD = [
     (re.compile(r"\b(?:\d[ -]?){13,19}\b"), "<CARD>"),
     (_ADDRESS_RE, "<ADDRESS>"),
     (_PHONE_INTL_SHORT_RE, "<PHONE>"),
-    (_PHONE_LONG_RE, "<PHONE>"),
+    # #1586 — order matters within the phone group: E.164 and the separated form
+    # first (both carry their own signal), bare-10 last so it only ever sees runs
+    # the more specific patterns did not already claim.
+    (_PHONE_E164_RE, "<PHONE>"),
+    (_PHONE_SEP_RE, "<PHONE>"),
+    (_PHONE_BARE10_RE, "<PHONE>"),
 ]
 
 
