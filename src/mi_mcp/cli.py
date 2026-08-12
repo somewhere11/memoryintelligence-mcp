@@ -455,6 +455,11 @@ def cmd_wire(argv: list[str]) -> int:
 #: PyPI project name — the package this CLI ships as.
 PYPI_PROJECT = "memoryintelligence-mcp"
 
+#: The public GitHub mirror — the SECOND channel this package ships on (#1347).
+#: A release reaches users through either, and they have diverged before.
+MIRROR_REPO = "somewhere11/memoryintelligence-mcp"
+MIRROR_BRANCH = "main"
+
 #: Set truthy to skip doctor's release check entirely (no network call at all).
 NO_VERSION_CHECK_ENV = "MI_MCP_NO_VERSION_CHECK"
 
@@ -500,6 +505,60 @@ def _latest_pypi_version(project: str = PYPI_PROJECT, timeout: float = 2.0) -> s
     return max(real, key=_version_tuple) if real else None
 
 
+def _latest_mirror_version(repo: str = MIRROR_REPO, timeout: float = 2.0) -> str | None:
+    """Version the public GitHub mirror currently holds, or None if unknowable.
+
+    Reads the mirror's own ``pyproject.toml`` rather than its tags, because that is
+    what a mirror install actually gives you (``pip install git+…@main``). A tag
+    marks a release; the file is the thing you get.
+
+    Never raises: offline, DNS, 404, rate limit and a changed file layout are all
+    "unknown", the same contract as :func:`_latest_pypi_version`.
+    """
+    import urllib.request
+
+    url = f"https://raw.githubusercontent.com/{repo}/{MIRROR_BRANCH}/pyproject.toml"
+    req = urllib.request.Request(url, headers={"User-Agent": f"mi-mcp/{__version__}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed https URL)
+            text = resp.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    # Anchored to a line-leading `version`, so `requires-python = ">=3.10"` — which
+    # also holds a dotted number — cannot be mistaken for the package version.
+    m = re.search(r'(?m)^\s*version\s*=\s*["\']([^"\']+)["\']', text)
+    return m.group(1).strip() if m else None
+
+
+def _latest_release(
+    pypi: str | None = None, mirror: str | None = None
+) -> tuple[str | None, dict]:
+    """(newest version across BOTH channels, {channel: version|None}).
+
+    "Latest" means newest *anywhere it ships*. Reading one channel and calling it
+    latest is what #1347 was filed about: for ~20 hours a mirror user on 0.2.6 was
+    told they were current because PyPI — which had never received 0.2.6 — was the
+    only thing consulted.
+    """
+    channels = {
+        "PyPI": _latest_pypi_version() if pypi is None else pypi,
+        "mirror": _latest_mirror_version() if mirror is None else mirror,
+    }
+    known = [v for v in channels.values() if v]
+    return (max(known, key=_version_tuple) if known else None), channels
+
+
+def _channels_diverge(channels: dict) -> bool:
+    """True only when two channels are both KNOWN and disagree.
+
+    An unreachable channel is *unknown*, not *different* — reporting a divergence
+    because the network was down would train users to ignore the warning, which is
+    the same way the original green tick stopped meaning anything.
+    """
+    known = {v for v in channels.values() if v}
+    return len(known) > 1
+
+
 def _upgrade_command() -> str:
     """The upgrade command for THIS install, not a generic guess.
 
@@ -535,27 +594,48 @@ def cmd_doctor(argv: list[str]) -> int:
     # Release check FIRST — being two versions behind explains most "the tool
     # doesn't have X" reports, and it is the one thing nothing else surfaces.
     # Non-critical: out of date is not broken, so it never fails doctor's exit code.
-    # Opt out with --no-version-check or MI_MCP_NO_VERSION_CHECK=1; the call is an
-    # anonymous PyPI index fetch (same as any install) and is skipped entirely then.
+    # Opt out with --no-version-check or MI_MCP_NO_VERSION_CHECK=1; the calls are
+    # anonymous index/raw-file fetches (same as any install) and are skipped then.
+    #
+    # BOTH channels are consulted (#1347). This package ships on PyPI *and* the
+    # public GitHub mirror, and they have diverged in production: 0.2.6 was tagged
+    # and installable from the mirror while PyPI went straight 0.2.5 → 0.2.7. Asking
+    # PyPI alone told a mirror user on 0.2.6 they were on the latest, which is the
+    # false reassurance this whole check exists to prevent.
     skip_vc = args.no_version_check or os.environ.get(
         NO_VERSION_CHECK_ENV, ""
     ).strip().lower() in ("1", "true", "yes", "on")
     if skip_vc:
         check("version", True, f"{__version__} (release check skipped)", critical=False)
     else:
-        latest = _latest_pypi_version()
+        latest, channels = _latest_release()
+        # Name the channels whenever they disagree — even when the user is already
+        # on the newest of the two. The divergence itself is the defect, and the
+        # person running doctor is the only one positioned to notice it.
+        where = ""
+        if _channels_diverge(channels):
+            where = "  [channels differ: " + ", ".join(
+                f"{name} {v or 'unknown'}" for name, v in channels.items()
+            ) + "]"
+
         if latest is None:
             # Unknown is NOT "up to date" — say so rather than imply green.
             check("version", True,
-                  f"{__version__} installed — could not reach PyPI, latest unknown",
+                  f"{__version__} installed — could not reach PyPI or the mirror, "
+                  f"latest unknown",
                   critical=False)
         elif _version_tuple(latest) > _version_tuple(__version__):
             check("version", False,
                   f"{__version__} installed, {latest} available — "
-                  f"`{_upgrade_command()} && mi-mcp wire`",
+                  f"`{_upgrade_command()} && mi-mcp wire`{where}",
                   critical=False)
         else:
-            check("version", True, f"{__version__} (latest)", critical=False)
+            # Current, but say which channels were actually readable. A lone
+            # reachable channel agreeing with you is weaker evidence than both.
+            unknown = [n for n, v in channels.items() if not v]
+            note = f" ({', '.join(unknown)} unreachable)" if unknown else ""
+            check("version", True, f"{__version__} (latest){note}{where}",
+                  critical=False)
 
     bin_path = _mi_mcp_bin()
     check("mi-mcp binary", Path(bin_path).exists(), bin_path)

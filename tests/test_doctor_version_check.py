@@ -24,6 +24,17 @@ import pytest
 from mi_mcp import cli
 
 
+@pytest.fixture(autouse=True)
+def _mirror_channel_silent(monkeypatch):
+    """This file pins the **PyPI** channel. Doctor consults a second one since
+    #1347 (the public GitHub mirror), which has its own file —
+    `test_doctor_mirror_channel.py`. Stub it to "unknown" here so each test below
+    still exercises exactly the PyPI behaviour it was written for, and so no test
+    in this file reaches the network to find out.
+    """
+    monkeypatch.setattr(cli, "_latest_mirror_version", lambda *a, **k: None)
+
+
 # --- 5. version ordering -----------------------------------------------------
 
 @pytest.mark.parametrize("lo,hi", [

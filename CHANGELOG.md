@@ -3,6 +3,29 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.11] — 2026-08-11
+
+### Fixed — `doctor` only ever asked PyPI, so a mirror install could not learn it was behind (#1347)
+
+This package ships on **two** channels — PyPI and the public GitHub mirror — and doctor
+consulted one. A user installed from the mirror could be **ahead of** PyPI and be told
+they were current. Not hypothetical: 0.2.6 was tagged and installable from the mirror
+while PyPI went 0.2.5 → 0.2.7, and for ~20 hours `mi-mcp doctor` answered
+`0.2.6 (latest)` with a green tick.
+
+The unreachable-PyPI branch already handled this class carefully — `latest unknown`,
+never "up to date". The divergence branch never got the same care.
+
+Doctor now reads **both** channels and reports the newest across them. When the channels
+disagree it names them, **even when you are on the newest of the two**, because the
+divergence itself is the defect and whoever runs `doctor` is the only person positioned
+to see it. When you are current, any unreachable channel is disclosed rather than hidden:
+one channel agreeing with you is weaker evidence than two. An unreachable channel is
+treated as *unknown*, never as *different*, so being offline does not raise a false alarm.
+
+`--no-version-check` / `MI_MCP_NO_VERSION_CHECK=1` still make **zero** network calls, now
+to either channel.
+
 ## [0.2.10] — 2026-08-11
 
 ### Fixed — the local PII floor over-redacted digit runs and ate the following space (#1586)

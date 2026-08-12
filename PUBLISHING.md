@@ -63,10 +63,23 @@ token that published `0.1.0`/`0.1.1`. Trusted Publishing replaces it.
 
 ## Releasing a version (every time)
 
-1. **Bump the version in all three places** (they must match):
-   - `pyproject.toml` → `version`
+1. **Bump the version in all four declaration sites** (they must match). This list
+   used to say "three places" and omitted `server.json` entirely — which has **two**
+   version entries, both checked. `scripts/mcp/version_guard.py` is the authority;
+   keep this list equal to its `read_versions()`:
+   - `pyproject.toml` → `[project].version`
    - `src/mi_mcp/__init__.py` → `__version__`
-   - `CHANGELOG.md` → new dated section
+   - `server.json` → `.version`
+   - `server.json` → `.packages[0].version`
+
+   …plus `CHANGELOG.md` → new dated section (not a version *declaration*, but the
+   guard and the checklist both expect it).
+
+   ⚠️ **Never reuse a published number.** If the current version is already on PyPI,
+   any source change requires a bump — two different bodies of code under one released
+   version is the #1135 two-0.2.2s incident. The guard fails the PR with
+   `version X is already published on PyPI with different code`, comparing the
+   published wheel's contents against `mcp-server/src`.
 2. **Land it on `main`** (mirror tracks shipped code).
 3. **Verify locally** (optional but recommended):
    ```bash
@@ -97,7 +110,10 @@ README rewrite).
 ## Pre-publish checklist
 - [ ] Trusted Publishing configured on PyPI (step 1) + `pypi` env with required reviewers (step 2).
 - [ ] `pyproject` `Repository` URL points to the public mirror (not the monorepo). ✅ set to `somewhere11/memoryintelligence-mcp`.
-- [ ] Version matches across `pyproject.toml`, `__init__.py`, `CHANGELOG.md`.
+- [ ] Version matches across `pyproject.toml`, `__init__.py`, **`server.json` (both
+      `.version` and `.packages[0].version`)** and `CHANGELOG.md`.
+- [ ] The version is **not already on PyPI**, or the source is byte-identical to what
+      was published under it (`scripts/mcp/version_guard.py` asserts this).
 - [ ] `twine check dist/*` passes; README renders.
 - [ ] `LICENSE`, `CHANGELOG.md`, `CONTRIBUTING.md` present (shipped in the sdist).
 - [ ] Tag `vX.Y.Z` == `pyproject` version.

@@ -188,17 +188,32 @@ mi-mcp status           # wired surfaces + opt-in allowlist
 mi-mcp wire --dry-run   # preview wiring changes
 ```
 
-**Staying current.** `doctor` compares your installed version against PyPI and
-prints the upgrade command for how you actually installed it:
+**Staying current.** `doctor` compares your installed version against **both**
+channels this package ships on — PyPI and the public GitHub mirror — and prints
+the upgrade command for how you actually installed it:
 
 ```
 [✗] version  0.2.5 installed, 0.2.8 available — `uv tool upgrade memoryintelligence-mcp && mi-mcp wire`
 ```
 
+Both channels are checked because they can diverge, and reading one alone told
+mirror users they were current when they were not (0.2.6 was installable from the
+mirror while PyPI went straight 0.2.5 → 0.2.7). When the channels disagree,
+`doctor` names them — even if you are on the newest of the two — because that
+divergence is worth knowing about:
+
+```
+[✓] version  0.2.6 (latest)  [channels differ: PyPI 0.2.5, mirror 0.2.6]
+```
+
+An unreachable channel reads as *unknown*, never as up to date, and never as a
+disagreement.
+
 Run `mi-mcp wire` after any upgrade — 0.2.6 renamed the server, and a config left
-pointing at the old id loses its tools silently. The check is an anonymous PyPI
-index fetch; skip it entirely with `--no-version-check` or
-`MI_MCP_NO_VERSION_CHECK=1`, and it fails quietly when you're offline.
+pointing at the old id loses its tools silently. The checks are anonymous fetches
+of the PyPI index and the mirror's `pyproject.toml`; skip them entirely with
+`--no-version-check` or `MI_MCP_NO_VERSION_CHECK=1`, and they fail quietly when
+you're offline.
 
 **Which server am I talking to?** The local server announces `mi-local`; the
 remote MCP surface announces `memoryintelligence-remote`. The local default
