@@ -45,14 +45,73 @@ def test_keyword_signal_breaks_a_semantic_tie():
     assert hits[0].scores["keyword"] > 0
 
 
+DAY = 86_400.0
+
+
 def test_recency_signal_breaks_a_tie():
+    """#1253 — rewritten. The old version asserted the BUG.
+
+    It placed two entries 100 seconds apart and asserted recency 1.0 vs 0.0.
+    That only held under corpus-relative normalization, where the oldest entry
+    defines the scale — so a 100-second gap was stretched into the full range.
+    Under an absolute 30-day decay those two entries are the same age (0 days),
+    and 1.0 vs 0.0 would be the wrong answer, not the right one.
+
+    The tie now breaks over a real span.
+    """
     idx = LocalIndex()
     idx.add(_entry("new", [1, 0, 0], summary="same", created_at=NOW))
-    idx.add(_entry("old", [1, 0, 0], summary="same", created_at=NOW - 100))
+    idx.add(_entry("old", [1, 0, 0], summary="same", created_at=NOW - 60 * DAY))
     hits = idx.search(query_embedding=[1, 0, 0], now=NOW)
     assert hits[0].umo_id == "new"
     assert hits[0].scores["recency"] == 1.0
     assert hits[1].scores["recency"] == 0.0
+
+
+def test_recency_is_absolute_not_corpus_relative():
+    """The regression this issue exists for.
+
+    Importing one unrelated OLD memory must not reorder — or even re-score —
+    the memories already in the index. Ranking must be a function of
+    (query, document), nothing else.
+    """
+    def _scores(index):
+        return {
+            h.umo_id: h.scores["recency"]
+            for h in index.search(query_embedding=[1, 0, 0], now=NOW)
+        }
+
+    idx = LocalIndex()
+    idx.add(_entry("a", [1, 0, 0], summary="same", created_at=NOW - 5 * DAY))
+    idx.add(_entry("b", [1, 0, 0], summary="same", created_at=NOW - 15 * DAY))
+    before = _scores(idx)
+
+    idx.add(_entry("ancient", [0, 1, 0], summary="unrelated",
+                   created_at=NOW - 900 * DAY))
+    after = _scores(idx)
+
+    assert before["a"] == after["a"], (
+        "an unrelated import changed an existing memory's recency score"
+    )
+    assert before["b"] == after["b"]
+    assert [k for k in ("a", "b") if k in after] == ["a", "b"]
+
+
+def test_recency_matches_the_cloud_reference_implementation():
+    """Semantics are REUSED from rerank.recency_score, not re-derived."""
+    from mi_mcp.local_index import _recency_score
+
+    for days in (0, 1, 7, 15, 29, 30, 45):
+        assert _recency_score(NOW - days * DAY, NOW) == pytest.approx(
+            max(0.0, 1.0 - days / 30)
+        ), f"diverged from the cloud curve at {days} days"
+
+
+def test_a_future_dated_entry_cannot_exceed_one():
+    """Clock skew must not let recency out-rank every real signal."""
+    from mi_mcp.local_index import _recency_score
+
+    assert _recency_score(NOW + 400 * DAY, NOW) == 1.0
 
 
 def test_entity_signal_applies_when_query_entities_given():

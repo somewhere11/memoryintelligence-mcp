@@ -37,8 +37,43 @@ from typing import Optional, Sequence
 # module — for its dataclasses or JSON persistence — never requires numpy. Only
 # ranking does. Keeps `pip install memoryintelligence-mcp` numpy-free.
 
-# Local ranking weights, kept comparable to the cloud ranking.
+# Local ranking weights. The NUMBERS match the cloud's
+# (`core/engines/rerank.py`); the SIGNALS underneath are not all identical, so
+# read this as "same blend, not the same function" rather than as a parity
+# guarantee. Recency is now genuinely shared (see below); keyword and entity
+# are still locally derived.
 DEFAULT_WEIGHTS = {"semantic": 0.60, "keyword": 0.15, "entity": 0.15, "recency": 0.10}
+
+#: Days over which recency decays to zero. Mirrors `rerank.recency_score`,
+#: which the cloud/sidecar read path uses.
+RECENCY_HALFLIFE_DAYS = 30.0
+_SECONDS_PER_DAY = 86_400.0
+
+
+def _recency_score(created_at: float, now: float) -> float:
+    """Absolute linear 30-day decay — NOT normalized against the corpus (#1253).
+
+    This was ``1.0 - ((now - created_at) / max_age)`` where ``max_age`` was the
+    age of the oldest entry in the index. A document's score therefore depended
+    on the whole corpus: **importing one old memory reordered every existing
+    result**, with no change to the query and no change to the memories being
+    ranked. Ranking stopped being a function of ``(query, document)``, which is
+    wrong under any architecture we might pick for the local runtime — which is
+    why it is fixed here rather than folded into the local/cloud convergence
+    question.
+
+    Semantics are reused from ``core/engines/rerank.py::recency_score`` rather
+    than re-derived: floor to whole days ago, linear decay over
+    ``RECENCY_HALFLIFE_DAYS``, floor at 0.0.
+
+    One deliberate difference from the cloud function, stated rather than
+    silent: the result is also capped at **1.0**. A future-dated entry (clock
+    skew, a bad import) yields a negative ``days_ago`` there and a score above
+    1.0, which would let recency out-rank every real signal. Capping cannot
+    hide a real difference — nothing legitimately scores above 1.0.
+    """
+    days_ago = (now - created_at) // _SECONDS_PER_DAY
+    return max(0.0, min(1.0, 1.0 - (days_ago / RECENCY_HALFLIFE_DAYS)))
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -124,9 +159,6 @@ class LocalIndex:
         q_tokens = _tokens(query_text)
         q_ents = {e.lower() for e in (query_entities or [])}
 
-        ages = [now - e.created_at for e in self._entries.values()]
-        max_age = max(ages) or 1.0  # normalize recency against the oldest entry
-
         w = self._weights
         hits = []
         for e in self._entries.values():
@@ -135,7 +167,7 @@ class LocalIndex:
             semantic = max(0.0, cos)  # similarity, never negative
             keyword = _overlap(q_tokens, _tokens(e.summary))
             entity = _overlap(q_ents, {x.lower() for x in e.entities}) if q_ents else 0.0
-            recency = 1.0 - ((now - e.created_at) / max_age)
+            recency = _recency_score(e.created_at, now)
             score = (
                 w["semantic"] * semantic
                 + w["keyword"] * keyword

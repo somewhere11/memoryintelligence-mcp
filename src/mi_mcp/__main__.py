@@ -43,9 +43,11 @@ def main():
         # user checking `--help` for `setup` shouldn't conclude the docs are stale.
         epilog=(
             "setup commands (run these first, not shown above):\n"
-            "  mi-mcp setup     store your API key + wire + opt-in + verify (one command)\n"
-            "  mi-mcp wire      wire into Claude Desktop / Code / Cursor\n"
-            "  mi-mcp doctor    verify install, key resolution, and wiring\n"
+            "  mi-mcp setup     first run: store your API key + wire + opt-in + verify\n"
+            "  mi-mcp wire      ALREADY SET UP AND SOMETHING BROKE? start here —\n"
+            "                   re-connects Claude Desktop / Code / Cursor and\n"
+            "                   never touches your key\n"
+            "  mi-mcp doctor    tells you which of the two you need\n"
             "  mi-mcp status    show wired surfaces + opt-in allowlist\n"
             "\nGet a key at https://memoryintelligence.io/portal, then run `mi-mcp setup`."
         ),

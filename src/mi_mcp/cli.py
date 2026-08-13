@@ -1082,6 +1082,36 @@ def cmd_backfill(argv: list[str]) -> int:
 # setup — the one-command front door (store key → wire → opt-in → verify)
 # ---------------------------------------------------------------------------
 
+def _stored_api_key(home: Path) -> str | None:
+    """Return (key, where) for a key already on disk/Keychain, else (None, "").
+
+    Deliberately does NOT consult ``MI_API_KEY`` from the environment, unlike
+    ``config.resolve_api_key``. Setup uses this to answer "do you already have a
+    key I would be about to overwrite?", and an env var is neither stored nor
+    overwritten — reporting it as "already stored" would be a lie the user
+    cannot act on.
+    """
+    account = os.environ.get("MI_KEYCHAIN_ACCOUNT") or os.environ.get("USER") or ""
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-s", "MI_API_KEY", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass  # non-macOS or `security` unavailable — fall through to the keyfile
+    envf = paths.resolve_keyfile(home)
+    if envf is not None:
+        for line in envf.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("MI_API_KEY="):
+                val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if val:
+                    return val
+    return None
+
+
 def _store_key_keychain(key: str, account: str) -> None:
     """Store the key in the macOS Keychain under service ``MI_API_KEY``.
 
@@ -1145,6 +1175,8 @@ def cmd_setup(argv: list[str]) -> int:
     )
     ap.add_argument("--api-key", default=None,
                     help="provide the key non-interactively (else you're prompted, hidden)")
+    ap.add_argument("--reset-key", action="store_true",
+                    help="replace a key that is already stored (default: keep it)")
     ap.add_argument("--store", choices=["auto", "keychain", "file"], default="auto",
                     help="where to keep the key (auto: Keychain on macOS, ~/.memoryintelligence/.env elsewhere)")
     ap.add_argument("--surfaces", default="desktop,code",
@@ -1174,6 +1206,46 @@ def cmd_setup(argv: list[str]) -> int:
     if key:
         print("  ⚠ --api-key is visible in the process list (ps); on shared machines\n"
               "    prefer the interactive prompt or the MI_API_KEY env var.", file=sys.stderr)
+
+    # #1351 — `setup` is the most discoverable command for "my install is
+    # broken, fix it", but it was written as the FIRST-RUN path and prompted
+    # for the key unconditionally. A returning user got sent to the portal to
+    # dig out a credential they never needed to touch, and a perfectly good
+    # stored key was overwritten.
+    #
+    # `mi-mcp wire` is the correct command for that user — it re-connects the
+    # hosts and never touches the key — and nothing told them so. `doctor`
+    # recommends `wire` in five places, but the whole failure is for the user
+    # who does NOT run doctor first and goes straight for the command whose
+    # name sounds like what they want.
+    #
+    # Resolution order, most explicit first:
+    #   --api-key  →  MI_API_KEY env  →  ALREADY-STORED key  →  prompt
+    #
+    # An env var set for this invocation is a deliberate per-run override and
+    # outranks what is on disk; a stored key outranks the prompt, which is the
+    # fix. Ordering matters and is asserted in test_cli_setup.py.
+    if not key and os.environ.get("MI_API_KEY"):
+        key = os.environ["MI_API_KEY"].strip()
+        print("  using MI_API_KEY from the environment")
+
+    if not key and not args.reset_key:
+        existing = _stored_api_key(home)
+        if existing:
+            key = existing
+            # Nothing derived from the key is printed — not a masked slice, not
+            # a hash. CodeQL taints the key value, so ANY derived value reaching
+            # stdout is a clear-text-logging flow, and it is right to: the useful
+            # fact here is that a key was kept and WHERE it lives, which needs no
+            # part of the secret. Two earlier attempts got this wrong — a
+            # `key[:11]…key[-4:]` mask (1 alert), then a SHA-256 fingerprint,
+            # which kept that alert AND added a weak-hash-on-sensitive-data one
+            # (2 alerts). `mi-mcp doctor` is where key identity belongs.
+            print("  keeping the key already stored on this machine")
+            print("        re-run with --reset-key to replace it\n")
+            print("  \u2139 if you only need to re-connect the hosts, `mi-mcp wire` is\n"
+                  "    the narrower command — it never touches your key.\n")
+
     if not key:
         if sys.stdin.isatty():
             print("Get a free key at https://memoryintelligence.io/portal")
@@ -1182,9 +1254,6 @@ def cmd_setup(argv: list[str]) -> int:
             except (EOFError, KeyboardInterrupt):
                 print("\naborted — nothing stored.", file=sys.stderr)
                 return 130
-        elif os.environ.get("MI_API_KEY"):
-            key = os.environ["MI_API_KEY"].strip()
-            print("  using MI_API_KEY from the environment")
         else:
             print("error: no API key. Run in a terminal to be prompted, set MI_API_KEY,\n"
                   "       or pass --api-key. Get a free key at https://memoryintelligence.io/portal",

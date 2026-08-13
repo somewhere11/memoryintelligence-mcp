@@ -178,6 +178,11 @@ def test_init_alias_runs_setup(tmp_path, monkeypatch, setup_env):
 
 def test_setup_requires_key_when_noninteractive(tmp_path, monkeypatch, setup_env):
     import io
+    # #1351: "no key" now has to mean no key ANYWHERE, including the Keychain —
+    # setup consults stored credentials before prompting, so without this stub
+    # the test would read the developer's real key off the host and pass or
+    # fail depending on whose machine it ran on.
+    _mock_keychain_miss(monkeypatch)
     monkeypatch.setattr("sys.stdin", io.StringIO(""))  # isatty() → False
     rc = run_admin("setup", [
         "--home", str(tmp_path), "--store", "file", "--no-opt-in",
@@ -202,3 +207,163 @@ def test_setup_reads_key_from_env_when_noninteractive(tmp_path, monkeypatch, set
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# =============================================================================
+# #1351 — re-running `setup` must not destroy a working key
+# =============================================================================
+#
+# `setup` is the most discoverable command for "my install is broken, fix it",
+# but it was written as the FIRST-RUN path and prompted for the key
+# unconditionally. A returning user got sent to the portal to dig out a
+# credential they never needed to touch, and a perfectly good stored key was
+# overwritten. `mi-mcp wire` is the right command for that user — it
+# re-connects the hosts and never touches the key — and nothing said so.
+
+OLD_KEY = "mi_sk_test_existing_0123456789"
+NEW_KEY = "mi_sk_test_replacement_9876543"
+
+
+def _seed_keyfile(home, key):
+    """Put a key on disk the way a previous `setup --store file` would have."""
+    envf = _envfile(home)
+    envf.parent.mkdir(parents=True, exist_ok=True)
+    envf.write_text(f'MI_API_KEY="{key}"\n')
+    envf.chmod(0o600)
+    return envf
+
+
+class TestSetupKeepsAnExistingKey:
+    def test_rerun_without_a_key_keeps_the_stored_one(
+        self, tmp_path, monkeypatch, setup_env
+    ):
+        """The defect: a re-run used to demand the key again and overwrite it."""
+        _mock_keychain_miss(monkeypatch)
+        _seed_keyfile(tmp_path, OLD_KEY)
+
+        # No --api-key, no MI_API_KEY, and NOT a tty. Before the fix this path
+        # errored with "no API key" (exit 2) rather than using what was there.
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False, raising=False)
+
+        rc = run_admin("setup", [
+            "--home", str(tmp_path), "--surfaces", "code",
+            "--store", "file", "--no-opt-in",
+        ])
+        assert rc == 0, "a re-run with a key already stored must just work"
+        assert f'MI_API_KEY="{OLD_KEY}"' in _envfile(tmp_path).read_text()
+
+    def test_reset_key_flag_still_replaces_it(
+        self, tmp_path, monkeypatch, setup_env
+    ):
+        """Keeping the key must not make replacing it impossible."""
+        _mock_keychain_miss(monkeypatch)
+        _seed_keyfile(tmp_path, OLD_KEY)
+
+        rc = run_admin("setup", [
+            "--home", str(tmp_path), "--surfaces", "code", "--store", "file",
+            "--no-opt-in", "--reset-key", "--api-key", NEW_KEY,
+        ])
+        assert rc == 0
+        assert f'MI_API_KEY="{NEW_KEY}"' in _envfile(tmp_path).read_text()
+
+    def test_an_explicit_key_still_wins_without_reset(
+        self, tmp_path, monkeypatch, setup_env
+    ):
+        """Passing --api-key is an unambiguous instruction; honour it."""
+        _mock_keychain_miss(monkeypatch)
+        _seed_keyfile(tmp_path, OLD_KEY)
+
+        rc = run_admin("setup", [
+            "--home", str(tmp_path), "--surfaces", "code", "--store", "file",
+            "--no-opt-in", "--api-key", NEW_KEY,
+        ])
+        assert rc == 0
+        assert f'MI_API_KEY="{NEW_KEY}"' in _envfile(tmp_path).read_text()
+
+    def test_the_kept_key_is_never_printed_in_full(
+        self, tmp_path, monkeypatch, setup_env, capsys
+    ):
+        _mock_keychain_miss(monkeypatch)
+        _seed_keyfile(tmp_path, OLD_KEY)
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False, raising=False)
+
+        run_admin("setup", [
+            "--home", str(tmp_path), "--surfaces", "code",
+            "--store", "file", "--no-opt-in",
+        ])
+        out = capsys.readouterr()
+        combined = out.out + out.err
+        assert OLD_KEY not in combined, "setup echoed the secret"
+
+        # ⚠️ NOTHING DERIVED FROM THE KEY, not merely "not the whole key".
+        #
+        # This test used to accept `mi_sk_test_…` — a `key[:11]…key[-4:]` mask —
+        # as proof of masking, so it would have PASSED on the leak it existed to
+        # prevent. CodeQL flagged that line as clear-text logging of sensitive
+        # information (high). Replacing the mask with a SHA-256 fingerprint did
+        # not help: CodeQL taints the key value, so the hash was still a logging
+        # flow AND added a second alert for weak hashing of sensitive data.
+        #
+        # The resolution is that nothing key-derived is printed at all. What the
+        # user needs is that a key was kept and WHERE — neither requires any part
+        # of the secret.
+        secret = OLD_KEY.split("_", 3)[-1]          # the part after mi_sk_<env>_
+        assert secret[-4:] not in combined, "a tail of the secret was printed"
+        assert secret[:6] not in combined, "a head of the secret was printed"
+
+        import hashlib
+
+        assert hashlib.sha256(OLD_KEY.encode()).hexdigest()[:8] not in combined, (
+            "a hash of the key was printed — still a derived-secret flow"
+        )
+        # …and the useful half survives: that a key was kept.
+        assert "keeping the key already stored" in out.out
+
+    def test_output_points_at_wire_as_the_narrower_command(
+        self, tmp_path, monkeypatch, setup_env, capsys
+    ):
+        """The discoverability half of the bug, not just the destructive half."""
+        _mock_keychain_miss(monkeypatch)
+        _seed_keyfile(tmp_path, OLD_KEY)
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False, raising=False)
+
+        run_admin("setup", [
+            "--home", str(tmp_path), "--surfaces", "code",
+            "--store", "file", "--no-opt-in",
+        ])
+        assert "mi-mcp wire" in capsys.readouterr().out, (
+            "a user who reached for `setup` because something broke should be "
+            "told which command they actually wanted"
+        )
+
+
+def test_stored_key_lookup_ignores_the_environment(tmp_path, monkeypatch):
+    """`_stored_api_key` answers "what would I overwrite?", not "what resolves?".
+
+    `config.resolve_api_key` consults MI_API_KEY from the environment. Setup
+    must not: an env var is neither stored nor overwritten, so reporting it as
+    "already stored" would be a claim the user cannot act on.
+    """
+    _mock_keychain_miss(monkeypatch)
+    monkeypatch.setenv("MI_API_KEY", "mi_sk_test_from_the_environment")
+    assert cli._stored_api_key(tmp_path) is None
+
+
+def test_env_var_outranks_a_stored_key(tmp_path, monkeypatch, setup_env):
+    """Precedence: --api-key → MI_API_KEY → stored → prompt.
+
+    Setting MI_API_KEY for one invocation is a deliberate per-run override; a
+    key sitting on disk must not shadow it. The reverse order would make
+    `MI_API_KEY=… mi-mcp setup` a silent no-op on any machine already set up.
+    """
+    _mock_keychain_miss(monkeypatch)
+    _seed_keyfile(tmp_path, OLD_KEY)
+    monkeypatch.setenv("MI_API_KEY", NEW_KEY)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False, raising=False)
+
+    rc = run_admin("setup", [
+        "--home", str(tmp_path), "--surfaces", "code",
+        "--store", "file", "--no-opt-in",
+    ])
+    assert rc == 0
+    assert f'MI_API_KEY="{NEW_KEY}"' in _envfile(tmp_path).read_text()

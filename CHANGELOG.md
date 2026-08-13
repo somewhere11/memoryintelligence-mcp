@@ -3,6 +3,50 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.13] — 2026-08-12
+
+### Fixed — `setup` could not be re-run without re-entering your API key (#1351)
+
+`mi-mcp setup` is the most discoverable command for "my install is broken, fix it", but it
+was written as the **first-run** path: it prompted for the API key unconditionally, so a
+returning user got sent to the portal to dig out a credential they never needed to touch,
+and a perfectly good stored key was overwritten.
+
+`setup` now **keeps a key that is already in the Keychain or the keyfile**, printing only a
+masked prefix. `--reset-key` replaces it deliberately. Resolution order, most explicit
+first: `--api-key` → `MI_API_KEY` → already-stored → prompt.
+
+It also names the command that user actually wanted. **`mi-mcp wire`** re-connects Claude
+Desktop / Code / Cursor and never touches your key — `doctor` recommended it in five
+places, but the failure is precisely for the user who does not run `doctor` first. The
+`--help` epilog now says which of the two you need.
+
+## [0.2.12] — 2026-08-12
+
+### Fixed — local recency was corpus-relative, so importing one old memory reordered every result (#1253)
+
+`LocalIndex.search` normalised recency against `max_age`, the age of the **oldest entry
+currently in the index**. A document's score therefore depended on the whole corpus, not
+on the query and the document: import one old memory and every existing result reorders,
+with no change to the query and no change to the memories being ranked. Ranking stopped
+being a function of `(query, document)`.
+
+Recency is now an **absolute linear 30-day decay**, with semantics reused from the cloud
+read path (`core/engines/rerank.py::recency_score`) rather than re-derived — floor to
+whole days, decay over 30, floor at 0.0. One deliberate difference, stated rather than
+silent: the result is also capped at **1.0**, so a future-dated entry from clock skew
+cannot let recency out-rank every real signal.
+
+`DEFAULT_WEIGHTS` carried the comment *"kept comparable to the cloud ranking."* The
+numbers do match; the signals underneath do not all match. It now says so. Recency is
+genuinely shared as of this release; keyword and entity remain locally derived.
+
+⚠️ **Ranking output changes for any vault whose oldest entry is not ~30 days old.** Under
+the old formula the oldest entry always scored 0.0 recency and the newest always 1.0,
+whatever the real span. Absolute decay means a vault where everything is a week old now
+sees recency contribute ~equally across all entries — which is correct, and is the point.
+
+||||||| parent of 3fd5f209 (fix(mcp): setup keeps an already-stored key, and names `wire` as the repair command)
 ## [0.2.11] — 2026-08-11
 
 ### Fixed — `doctor` only ever asked PyPI, so a mirror install could not learn it was behind (#1347)
