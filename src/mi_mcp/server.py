@@ -168,6 +168,9 @@ def _shape_ask(result: Any, explain: Any = "none") -> Any:
             "umo_id":  r.get("umo_id"),
             # content_text duplicates summary; fall back to it only if summary is empty.
             "summary": r.get("summary") or r.get("content_text"),
+            # The memory's stored title (API migration 079): its own on a
+            # memory, the parent memory's on a claim. Kept only when present.
+            **{k: r[k] for k in ("title", "memory_title") if r.get(k)},
             # #538: the API omits source when it's the default — absent means "api".
             "source":  r.get("source") or "api",
             "score":   r.get("score"),
@@ -186,10 +189,25 @@ def _shape_ask(result: Any, explain: Any = "none") -> Any:
     # level; drop the receipt's duplicate result seals (the hits already carry
     # them) and keep the fields an agent cites. Absent when receipts are
     # disabled server-side — then the shape is just {"results": [...]}.
+    # #1117: the answerability verdict, surfaced WITHOUT asking for explain.
+    # Every hit already carries a `score`, and on the CE scale ~94% of them read
+    # 0.0 (#2013) — so a junk row and a good row look identical to a reading
+    # model. `answerable` is the one field that separates them. It rides at the
+    # envelope level, next to results, because a model that has to opt in to the
+    # verdict will not.
+    #
+    # ADVISORY, deliberately: the rows are still here and a caller may cite them.
+    # This says what MI thinks, it does not withhold.
+    envelope: dict = {"results": shaped}
+    if isinstance(data.get("answerable"), bool):
+        envelope["answerable"] = data["answerable"]
+        if data.get("top_similarity") is not None:
+            envelope["top_similarity"] = data["top_similarity"]
+
     receipt = data.get("knowledge_receipt")
     if isinstance(receipt, dict):
         return {
-            "results": shaped,
+            **envelope,
             "knowledge_receipt": {
                 "receipt_id":        receipt.get("receipt_id"),
                 "question_hash":     receipt.get("question_hash"),
@@ -198,7 +216,7 @@ def _shape_ask(result: Any, explain: Any = "none") -> Any:
                 "versions":          receipt.get("versions"),
             },
         }
-    return {"results": shaped}
+    return envelope
 
 
 def _entity_tags(it: dict) -> list:
@@ -246,6 +264,7 @@ def _shape_list(result: Any) -> Any:
             continue
         shaped.append({
             "umo_id":     it.get("umo_id"),
+            **{k: it[k] for k in ("title", "memory_title") if it.get(k)},
             "summary":    it.get("summary"),
             "source":     it.get("source"),
             "topics":     it.get("topics"),

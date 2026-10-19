@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.json",
   "name": "io.github.somewhere11/memoryintelligence-mcp",
-  "description": "Give your AI assistant a memory you own \u2014 capture, recall (with citations), and list structured memories via the MemoryIntelligence API. Set up in one command; your API key stays in your OS keychain, never in a config.",
+  "description": "DEPRECATED \u2014 0.2.14 is the final release. Use the MemoryIntelligence desktop app's built-in MCP, or the claude.ai MemoryIntelligence connector. (Legacy: capture, recall with citations, and list structured memories via the MemoryIntelligence API.)",
   "repository": {
     "url": "https://github.com/somewhere11/memoryintelligence-mcp",
     "source": "github"
   },
-  "version": "0.2.13",
+  "version": "0.2.14",
   "websiteUrl": "https://memoryintelligence.io/docs/mcp",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "memoryintelligence-mcp",
-      "version": "0.2.13",
+      "version": "0.2.14",
       "transport": {
         "type": "stdio"
       }

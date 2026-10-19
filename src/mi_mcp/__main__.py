@@ -20,7 +20,7 @@ import asyncio
 import logging
 import sys
 
-from . import __version__
+from . import __version__, warn_deprecated
 
 logger = logging.getLogger("mi_mcp")
 
@@ -95,6 +95,11 @@ def main():
     # main(), so the host log shows the process actually started. Without it, a hang in
     # config/import reads as a silent "connected → 60s timeout" with no failure point.
     logger.info("mi-mcp %s starting…", __version__)
+
+    # #2186 — final release. Anyone who still has mi-local wired sees this in the
+    # host's MCP log on every start; nothing is removed and nothing changes shape.
+    # stderr only: stdout is the MCP transport.
+    warn_deprecated()
 
     # Load config from env (CLI args override env vars)
     from .config import MIConfig

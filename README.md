@@ -1,5 +1,19 @@
 # MemoryIntelligence MCP Server
 
+> ## ⚠️ DEPRECATED — 0.2.14 is the final release
+>
+> This package (`mi-local`) is retired. It keeps working but receives no further
+> updates, fixes, or new tools. Replace it with:
+>
+> - **On your computer:** the MemoryIntelligence desktop app's built-in MCP
+>   (*Connect Claude* inside the app). It sees everything you connect to MI and
+>   enforces the per-category disclosure you choose there, which this package
+>   never could.
+> - **On the web and phone:** the claude.ai **MemoryIntelligence** connector.
+>
+> Every start of `mi-mcp`, `mi-mcp setup` and `mi-mcp doctor` prints this notice
+> to stderr. Decision and rationale: [MemoryIntelligence#2186](https://github.com/somewhere11/MemoryIntelligence/issues/2186).
+
 [![PyPI](https://img.shields.io/pypi/v/memoryintelligence-mcp.svg)](https://pypi.org/project/memoryintelligence-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/memoryintelligence-mcp.svg)](https://pypi.org/project/memoryintelligence-mcp/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)

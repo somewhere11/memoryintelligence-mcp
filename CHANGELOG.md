@@ -3,7 +3,72 @@
 All notable changes to `memoryintelligence-mcp` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/); this project uses [Semantic Versioning](https://semver.org/).
 
-## [0.2.13] — 2026-08-12
+## [0.2.14] — 2026-10-19 — FINAL RELEASE
+
+### Deprecated — this package is retired; 0.2.14 is its last release (#2186)
+
+`[KASEY-STATED 2026-09-18, release decided 2026-10-19]` `mi-local` — this package — is
+retired. It keeps working exactly as it does today, but it receives no further updates,
+fixes, or tools. Nothing is removed in this release; the deprecation is a **signal**, not a
+cut.
+
+**What replaces it**
+
+- **On your computer:** the MemoryIntelligence desktop app's built-in MCP server
+  (*Connect Claude* inside the app). It sees everything you connect to MI — including
+  sources this package never could, such as Drive imports — and it enforces the
+  per-category disclosure you choose there. This package's redaction is pattern-matched
+  PII; the desktop's is the choice you actually made.
+- **On the web and phone:** the claude.ai **MemoryIntelligence** connector (the remote
+  MCP served by the API).
+
+**What you will see**
+
+Every start of the server, and every `mi-mcp setup` / `mi-mcp doctor`, prints one line to
+**stderr** (never stdout — stdout is the MCP transport):
+
+```
+[mi-mcp] DEPRECATED: mi-mcp (mi-local) is DEPRECATED and 0.2.14 is its final release. It keeps working, but receives no further updates. Use the MemoryIntelligence desktop app's built-in MCP (Connect Claude) on your computer, or the claude.ai MemoryIntelligence connector on the web and phone. Details: https://github.com/somewhere11/MemoryIntelligence/issues/2186
+```
+
+In a host that shows MCP logs (Claude Desktop's MCP log, Claude Code's `--mcp-debug`) that
+line appears on each connection. The PyPI listing carries `Development Status :: 7 -
+Inactive` and the same sentence in its summary; `server.json` says the same to the MCP
+registry.
+
+**Why a final release at all, rather than silence:** the package already on PyPI (0.2.13)
+would otherwise keep being installed from docs and search results with no signal that it
+is going away — the exact "nobody who has it configured ever sees the notice" failure
+#2186 names. The two changes below had also landed on `main` under 0.2.14 without
+shipping, which is the version-drift mode #2186 exists to end; this release closes it.
+
+### Added — `mi_ask` reports whether your memory can answer at all (#1117)
+
+`mi_ask` results now carry `answerable` (boolean) at the envelope level, with
+`top_similarity` beside it when the API provides one. Every hit already carried a
+`score`, but on the cross-encoder scale most read `0.0`, so a junk row and a good row
+looked identical to a reading model. `answerable` is the one field that separates them.
+It is **advisory**: the rows are still returned and may be cited; this says what MI thinks,
+it does not withhold.
+
+### Added — memories carry their stored title (#2258)
+
+`mi_ask` and `mi_list` results include `title` on a memory and `memory_title` on a claim
+(the title of the memory it was cut from), when the API has one. The API now stores one
+title per memory (migration 079) instead of each surface inventing a label.
+
+### Not changed — large captures can still time out on the client (#1669)
+
+The 30-second read timeout on `mi_capture` is unchanged. `[MEASURED 2026-08-17]` the
+captures that failed took 1m45s–2m50s server-side, so no reasonable timeout bump makes them
+reliable; the real fix is an idempotency key and a non-blocking capture, which belongs in
+the surfaces that replace this one, not in a final release. After a `ReadTimeout`, do not
+retry — call `mi_list` and check whether the capture landed.
+
+## [0.2.13] — 2026-08-13
+
+> Ships **both** its own fix and 0.2.12's — see the note under [0.2.12].
+
 
 ### Fixed — `setup` could not be re-run without re-entering your API key (#1351)
 
@@ -21,7 +86,20 @@ Desktop / Code / Cursor and never touches your key — `doctor` recommended it i
 places, but the failure is precisely for the user who does not run `doctor` first. The
 `--help` epilog now says which of the two you need.
 
-## [0.2.12] — 2026-08-12
+## [0.2.12] — 2026-08-12 — NEVER PUBLISHED
+
+> ⚠️ **There is no 0.2.12 on PyPI.** The index goes 0.2.11 → 0.2.13.
+>
+> This number was minted on the branch for #1253, and #1351's branch independently
+> minted the same one. The `MCP version + release-drift guard` is there to stop two
+> different bodies of code shipping under one released version (#1135, the two-0.2.2s
+> incident), so the second branch moved to 0.2.13 rather than reusing it.
+>
+> **The fix described below did ship — in 0.2.13**, together with #1351's. This
+> section is kept rather than merged upward so the version history stays continuous
+> for anyone reading top to bottom, and so `#1253 → 0.2.12` in the commit trail
+> resolves to something.
+
 
 ### Fixed — local recency was corpus-relative, so importing one old memory reordered every result (#1253)
 

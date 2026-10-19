@@ -38,7 +38,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import __version__, paths
+from . import __version__, paths, warn_deprecated
 from .config import load_opt_in_paths
 
 # "mi-local" (#1320): the local stdio server's config id. It was
@@ -576,6 +576,7 @@ def _upgrade_command() -> str:
 
 
 def cmd_doctor(argv: list[str]) -> int:
+    warn_deprecated()  # #2186 — final release; stderr, before anything else
     ap = argparse.ArgumentParser(prog="mi-mcp doctor")
     ap.add_argument("--home", default=os.environ.get("HOME"))
     ap.add_argument("--no-version-check", action="store_true",
@@ -1169,6 +1170,7 @@ def _opt_in_dir(home: Path, directory: str) -> tuple[Path, bool]:
 
 
 def cmd_setup(argv: list[str]) -> int:
+    warn_deprecated()  # #2186 — final release; stderr, before anything else
     ap = argparse.ArgumentParser(
         prog="mi-mcp setup",
         description="One command: store your key, wire hosts, opt in this dir, verify.",
